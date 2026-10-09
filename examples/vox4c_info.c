@@ -253,7 +253,8 @@ int main(int argc, char** argv)
         static const char* modes[]     = { "perspective", "free", "panorama", "orthographic", "isometric", "unknown" };
         printf("\n== render settings\n");
         if (r->has_background)
-            printf("  background  #%02x%02x%02x\n", r->background.r, r->background.g, r->background.b);
+            printf("  background  #%02x%02x%02x%s\n", r->background.r, r->background.g, r->background.b,
+                   (int)r->show_background ? " (shown in the render)" : " (the render shows the sky)");
 
         if (r->has_ambient)
             printf("  ambient     #%02x%02x%02x intensity %g\n", r->ambient_color.r, r->ambient_color.g,

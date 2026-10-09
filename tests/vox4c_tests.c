@@ -1408,6 +1408,246 @@ static void test_lenses(void)
     }
 }
 
+/* Files of MagicaVoxel 0.98 and older (version 150): no scene graph, PACK,
+   no RGBA chunk when the default palette is used. */
+static unsigned char* make_legacy_file(int frames, size_t* size)
+{
+    buf_t         file = { NULL, 0, 0 }, main_c = { NULL, 0, 0 }, pack = { NULL, 0, 0 };
+    unsigned char v[4] = { 1, 2, 4, 9 };
+    int           i;
+    put_i32(&pack, frames);
+    put_chunk(&main_c, "PACK", &pack);
+    for (i = 0; i < frames; ++i)
+    {
+        buf_t size_c = { NULL, 0, 0 }, xyzi = { NULL, 0, 0 };
+        put_i32(&size_c, 3);
+        put_i32(&size_c, 4);
+        put_i32(&size_c, 5 + i); /* only the first frame decides the placement */
+        put_i32(&xyzi, 1);
+        put(&xyzi, v, 4);
+        put_chunk(&main_c, "SIZE", &size_c);
+        put_chunk(&main_c, "XYZI", &xyzi);
+        free(size_c.p);
+        free(xyzi.p);
+    }
+
+    put(&file, "VOX ", 4);
+    put_i32(&file, 150);
+    put(&file, "MAIN", 4);
+    put_i32(&file, 0);
+    put_i32(&file, (int32_t)main_c.n);
+    put(&file, main_c.p, main_c.n);
+    free(main_c.p);
+    free(pack.p);
+    *size = file.n;
+    return file.p;
+}
+
+static void test_legacy_files(void)
+{
+    int frames;
+    printf("legacy (version 150) files\n");
+    for (frames = 1; frames <= 2; ++frames)
+    {
+        size_t           size;
+        unsigned char*   file = make_legacy_file(frames, &size);
+        v4c_load_options opt;
+        v4c_scene*       s = NULL;
+        int              yup;
+        for (yup = 0; yup <= 1; ++yup)
+        {
+            v4c_default_load_options(&opt);
+            opt.coord_system = yup ? V4C_COORDS_Y_UP_RIGHT_HANDED : V4C_COORDS_Z_UP_RIGHT_HANDED;
+            CHECK(v4c_load_memory(file, size, &opt, &s) == V4C_SUCCESS && s, "legacy file (%d frame(s)) loads", frames);
+            if (!s)
+                continue;
+
+            CHECK(s->file_version == 150 && s->num_models == (uint32_t)frames, "legacy models");
+            /* root + one model node, like MagicaVoxel's own conversion */
+            CHECK(s->num_nodes == 2 && s->nodes[0].num_children == 1, "legacy graph: %u nodes", s->num_nodes);
+            if (s->num_nodes == 2)
+            {
+                const v4c_node*      n = &s->nodes[1];
+                const v4c_transform* t = &n->transform_keys[0].transform;
+                /* stood on the ground: translation z = floor(5 / 2) = 2 */
+                const float expect[3] = { 0.0f, yup ? 2.0f : 0.0f, yup ? 0.0f : 2.0f };
+                CHECK(n->num_transform_keys == 1 && floats_equal(t->translation, expect, 3),
+                      "legacy placement (%g, %g, %g)", t->translation[0], t->translation[1], t->translation[2]);
+                CHECK(n->num_model_keys == (uint32_t)frames, "legacy model keys: %u", n->num_model_keys);
+                if (frames == 2 && n->num_model_keys == 2)
+                    CHECK(n->model_keys[1].frame == 1 && n->model_keys[1].model == 1, "PACK frame 1 -> model 1");
+            }
+
+            /* no RGBA chunk: MagicaVoxel's default palette, color 9 = #ffcc99 */
+            if (s->num_models > 0 && s->models[0].num_voxels == 1)
+            {
+                const v4c_color c = s->materials[s->models[0].voxels[0].material].color;
+                CHECK(c.r == 255 && c.g == 204 && c.b == 153 && c.a == 255, "default palette color 9: %d %d %d %d", c.r,
+                      c.g, c.b, c.a);
+            }
+            v4c_free_scene(s);
+            s = NULL;
+        }
+        free(file);
+    }
+}
+
+/* MATT (0.98) and MATL dictionaries of 0.99.1 / 0.99.4, as those versions write
+   them (taken from chr_knight saved by each version). The expected values are
+   what MagicaVoxel 0.99.7 writes when it re-saves those files. */
+static void put_matt(buf_t* out, int32_t id, int32_t type, float weight, uint32_t bits, const float* values, int n)
+{
+    buf_t c = { NULL, 0, 0 };
+    int   i;
+    put_i32(&c, id);
+    put_i32(&c, type);
+    put(&c, &weight, 4); /* little-endian hosts only, like the rest of the test data */
+    put_i32(&c, (int32_t)bits);
+    for (i = 0; i < n; ++i)
+        put(&c, &values[i], 4);
+
+    put_chunk(out, "MATT", &c);
+    free(c.p);
+}
+
+static void test_legacy_materials(void)
+{
+    static const float v_glass[5] = { 0.0f, 0.378947f, 0.5f, 0.505263f, 0.326316f };
+    static const float v_emit[6]  = { 0.0f, 0.1f, 0.5f, 0.3f, 2.0f, 0.231579f }; /* bit 7: no value */
+    buf_t              file = { NULL, 0, 0 }, main_c = { NULL, 0, 0 };
+    v4c_scene*         s = NULL;
+
+    printf("legacy materials (0.98 MATT, 0.99.1 / 0.99.4 MATL)\n");
+    /* 0.98.2 */
+    put_matt(&main_c, 9, 2, 0.305263f, 0x1f, v_glass, 5);
+    put_matt(&main_c, 3, 3, 0.263158f, 0xef, v_emit, 6);
+    /* 0.99.1: ids 0..255 */
+    put_matl(&main_c, 0, "_type=_diffuse;_weight=1;_rough=0.1;_spec=0.5;_ior=0.3");
+    put_matl(&main_c, 95, "_type=_metal;_weight=0.252632;_rough=0.305263;_spec=0.642105;_ior=0.3");
+    put_matl(&main_c, 155, "_type=_diffuse;_weight=1;_plastic=1;_rough=0.1;_spec=0.663158;_ior=0.3");
+    put_matl(&main_c, 247, "_type=_emit;_weight=0.231579;_rough=0.1;_spec=0.5;_ior=0.3;_flux=2;_glow=0.315789");
+    put_matl(&main_c, 252, "_type=_glass;_weight=0.431579;_rough=0.326316;_spec=0.5;_ior=0.378947;_att=0.410526");
+    /* 0.99.4.2: ids 1..256 */
+    put_matl(&main_c, 248,
+             "_type=_metal;_weight=0.25;_rough=0.34;_spec=0.63;_spec_p=0.5;_ior=0.3;_att=0;_g0=-0.5;_g1=0.8;_gw=0.7;"
+             "_flux=0;_ldr=0");
+    put_matl(&main_c, 250,
+             "_type=_plastic;_weight=0.28;_rough=0.42;_spec=0.5;_spec_p=0.7;_ior=0.3;_att=0;_g0=-0.5;_g1=0.8;_gw=0.7;"
+             "_flux=0;_ldr=0");
+    put_matl(&main_c, 197,
+             "_type=_emit;_weight=0.28;_rough=0.1;_spec=0.5;_spec_p=0.5;_ior=0.3;_att=0;_g0=-0.5;_g1=0.8;_gw=0.7;"
+             "_flux=2;_ldr=0.27");
+    put_matl(&main_c, 249,
+             "_type=_media;_weight=0.33;_rough=0.1;_spec=0.5;_spec_p=0.5;_ior=0.3;_att=0;_g0=-0.25;_g1=0.9;_gw=0.53;"
+             "_flux=0;_ldr=0");
+    put_matl(&main_c, 251,
+             "_type=_glass;_weight=0.26;_rough=0.26;_spec=0.5;_spec_p=0.5;_ior=0.65;_att=0.34;_g0=-0.5;_g1=0.8;_gw=0.7;"
+             "_flux=0;_ldr=0");
+    put_matl(&main_c, 10,
+             "_type=_media;_weight=0.01;_rough=0.1;_spec=0.5;_spec_p=0.5;_ior=0.3;_att=0;_g0=-0.5;_g1=0.8;_gw=0.7;"
+             "_flux=0;_ldr=0");
+    put_matl(&main_c, 11, "_type=_media;_weight=0.05");
+    put_matl(&main_c, 12, "_type=_media;_weight=0.1");
+    put_matl(&main_c, 13, "_type=_media;_weight=0.2");
+    /* glass: _d from _att by the same curve, 0 for _att 0 */
+    put_matl(&main_c, 20, "_type=_glass;_weight=0.05;_att=0");
+    put_matl(&main_c, 21, "_type=_glass;_weight=0.05;_att=0.05");
+    put_matl(&main_c, 22, "_type=_glass;_weight=0.05;_att=0.2");
+    put_matl(&main_c, 23, "_type=_glass;_weight=0.05;_att=1");
+    put_matl(&main_c, 24, "_type=_media;_weight=0.22");
+    /* current files: a MATL without _d has density 0 */
+    put_matl(&main_c, 30, "_type=_glass;_rough=0.1;_ior=0.3;_ri=1.3");
+    /* a current key wins over _weight */
+    put_matl(&main_c, 100, "_type=_metal;_weight=0.9;_metal=0.4;_sp=1.5;_spec=0.1");
+    /* 0.99.1 background switched off */
+    put_dict_chunk(&main_c, "rOBJ", 0, 0, "_type=_bg;_color=10 20 30;_enable=0");
+
+    put(&file, "VOX ", 4);
+    put_i32(&file, 150);
+    put(&file, "MAIN", 4);
+    put_i32(&file, 0);
+    put_i32(&file, (int32_t)main_c.n);
+    put(&file, main_c.p, main_c.n);
+
+    CHECK(v4c_load_memory(file.p, file.n, NULL, &s) == V4C_SUCCESS && s, "legacy material file");
+    if (s)
+    {
+        const v4c_material* m = s->materials;
+        /* MATT glass: weight = transparency, ior stored as n - 1, specular only for metals */
+        CHECK(m[9].type == V4C_MATERIAL_GLASS && NEAR(m[9].transparency, 0.305263f) && NEAR(m[9].ior, 1.505263f) &&
+                  NEAR(m[9].roughness, 0.378947f) && NEAR(m[9].specular, 1.0f) && NEAR(m[9].attenuation, 0.326316f) &&
+                  NEAR(m[9].density, 0.1f) && !m[9].plastic,
+              "MATT glass");
+        /* MATT emit: weight = _emit, power = _flux, glow dropped */
+        CHECK(m[3].type == V4C_MATERIAL_EMIT && NEAR(m[3].emissive, 0.263158f) && NEAR(m[3].emission_power, 2.0f) &&
+                  NEAR(m[3].ldr, 0.0f),
+              "MATT emit: emit %g flux %g ldr %g", m[3].emissive, m[3].emission_power, m[3].ldr);
+        /* 0.99.1 writes an id 0, which 0.99.7 ignores: index 0 keeps the defaults of a material without MATL */
+        CHECK(m[0].type == V4C_MATERIAL_DIFFUSE && NEAR(m[0].density, 0.05f) && NEAR(m[0].weight, 1.0f),
+              "0.99.1 id 0 ignored");
+        CHECK(m[95].type == V4C_MATERIAL_METAL && NEAR(m[95].metallic, 0.252632f) && NEAR(m[95].specular, 1.642105f) &&
+                  NEAR(m[95].roughness, 0.305263f),
+              "0.99.1 metal: metal %g spec %g", m[95].metallic, m[95].specular);
+        /* 0.99.1 plastic: 0.99.7 makes it a plain diffuse material */
+        CHECK(m[155].type == V4C_MATERIAL_DIFFUSE && m[155].plastic && NEAR(m[155].specular, 1.0f), "0.99.1 plastic");
+        CHECK(NEAR(m[247].emissive, 0.231579f) && NEAR(m[247].ldr, 0.0f) && NEAR(m[247].emission_power, 2.0f),
+              "0.99.1 emit");
+        CHECK(m[252].type == V4C_MATERIAL_GLASS && NEAR(m[252].transparency, 0.431579f) &&
+                  NEAR(m[252].ior, 1.378947f) && NEAR(m[252].attenuation, 0.410526f) && NEAR(m[252].density, 0.1f),
+              "0.99.1 glass");
+        /* 0.99.4: the two phase lobes become _g = 0.7 * 0.8 + 0.3 * -0.5 */
+        CHECK(NEAR(m[248].metallic, 0.25f) && NEAR(m[248].specular, 1.63f) && NEAR(m[248].phase, 0.41f),
+              "0.99.4 metal");
+        /* 0.99.4 plastic: a metal without metalness, _ior = _spec_p */
+        CHECK(m[250].type == V4C_MATERIAL_METAL && m[250].plastic && NEAR(m[250].metallic, 0.0f) &&
+                  NEAR(m[250].ior, 1.7f) && NEAR(m[250].specular, 1.0f) && NEAR(m[250].roughness, 0.42f) &&
+                  NEAR(m[250].weight, 0.28f),
+              "0.99.4 plastic: type %d ior %g", (int)m[250].type, m[250].ior);
+        CHECK(NEAR(m[197].emissive, 0.28f) && NEAR(m[197].ldr, 0.27f), "0.99.4 emit");
+        CHECK(m[249].type == V4C_MATERIAL_MEDIA && m[249].media_type == V4C_MEDIA_SCATTER &&
+                  NEAR(m[249].density, 0.1f) && NEAR(m[249].phase, 0.3595f) && NEAR(m[249].weight, 0.33f),
+              "0.99.4 media: phase %g", m[249].phase);
+        CHECK(m[251].type == V4C_MATERIAL_GLASS && NEAR(m[251].transparency, 0.26f) && NEAR(m[251].ior, 1.65f) &&
+                  NEAR(m[251].density, 0.1f) && NEAR(m[251].phase, 0.41f),
+              "0.99.4 glass");
+        CHECK(NEAR(m[100].metallic, 0.4f) && NEAR(m[100].specular, 1.5f), "current keys win");
+        CHECK(s->render.has_background && !s->render.show_background && s->render.background.r == 10, "_bg _enable 0");
+        CHECK(m[10].type == V4C_MATERIAL_MEDIA && NEAR(m[10].density, 0.00400803f), "0.99.4 thin medium: d %g",
+              m[10].density);
+        CHECK(NEAR(m[20].density, 0.0f) && NEAR(m[21].density, 0.0202027f) && NEAR(m[22].density, 0.0833816f) &&
+                  NEAR(m[23].density, 0.1f) && NEAR(m[24].density, 0.0921153f),
+              "0.99.4 glass / media densities: %g %g %g %g %g", m[20].density, m[21].density, m[22].density,
+              m[23].density, m[24].density);
+        CHECK(m[30].type == V4C_MATERIAL_GLASS && NEAR(m[30].density, 0.0f), "MATL without _d: %g", m[30].density);
+        CHECK(NEAR(m[11].density, 0.0202027f) && NEAR(m[12].density, 0.040822f) && NEAR(m[13].density, 0.0833816f),
+              "0.99.4 media densities: %g %g %g", m[11].density, m[12].density, m[13].density);
+        v4c_free_scene(s);
+    }
+    free(main_c.p);
+    free(file.p);
+
+    /* 0.99.4 and later: the switch is _setting _bg_c, in a group of its own */
+    {
+        static const char* const robj[2][2] = { { "_type=_bg;_color=163 82 82", "_type=_setting;_bg_c=1;_bg_a=1" },
+                                                { "_type=_setting;_bg_c=0;_bg_a=1", "_type=_bg;_color=163 82 82" } };
+        int                      k;
+        for (k = 0; k < 2; ++k)
+        {
+            size_t         size;
+            unsigned char* data = make_render_file(robj[k], 2, NULL, 0, &size);
+            s                   = NULL;
+            CHECK(v4c_load_memory(data, size, NULL, &s) == V4C_SUCCESS && s, "background file");
+            if (s)
+                CHECK(s->render.has_background && s->render.background.r == 163 &&
+                          s->render.show_background == (k == 0),
+                      "_setting _bg_c = %d", k == 0);
+
+            v4c_free_scene(s);
+            free(data);
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     int              i;
@@ -1436,6 +1676,9 @@ int main(int argc, char** argv)
     test_render_settings();
     test_light_file();
     test_lenses();
+    test_legacy_files();
+    test_legacy_materials();
+
     for (i = 1; i < argc; ++i)
         test_file(argv[i]);
 

@@ -4,6 +4,8 @@ Single-header C99 library for loading [MagicaVoxel](https://ephtracy.github.io/)
 tinyobjloader / tinygltf. Works from C and C++, has no dependencies beyond the C standard library (not even `libm`).
 
 - models, palette and materials (`MATL`, legacy `MATT`)
+- files of every MagicaVoxel version from before 0.98.2 to 0.99.7 (the version number in the header is 150 up to
+  0.99.6 and 200 since 0.99.7); older materials are converted the way MagicaVoxel 0.99.7 converts them
 - the full scene graph (`nTRN` / `nGRP` / `nSHP`) exposed as a simple node tree that maps 1:1 onto engine entities
 - layers (`LAYR`) with name, colour and hidden flag
 - lighting and background of the MagicaVoxel render (sun as directional or area light, sky light, lens) and the
@@ -15,7 +17,8 @@ tinyobjloader / tinygltf. Works from C and C++, has no dependencies beyond the C
 - selectable output coordinate system (MagicaVoxel / Unreal / OpenGL / Unity / custom), scale and pivot
 
 A description of the `.vox` format, including everything learned while writing this library (renderer settings,
-cameras, lenses, defaults), is in [docs/VoxFileFormat.md](docs/VoxFileFormat.md).
+cameras, lenses, defaults), is in [docs/VoxFileFormat.md](docs/VoxFileFormat.md): part I covers the current
+format (MagicaVoxel 0.99.7), part II what older versions write differently.
 
 ## Quick start
 
@@ -64,19 +67,19 @@ and `v4c_material::palette_index` keeps the original index.
 |---|---|---|---|
 | `type` | `_type` | diffuse | |
 | `roughness` | `_rough` | 0.1 | all surfaces |
-| `metallic` | `_metal` | 0.0 | metal, blend |
-| `specular` | `_sp`, or `_spec` | 1.0 | metal, blend |
+| `metallic` | `_metal` (older: `_weight` of a metal) | 0.0 | metal, blend |
+| `specular` | `_sp` (older metal: `_spec` + 1) | 1.0 | metal, blend |
 | `ior` | `_ior + 1`, or `_ri` | 1.3 | glass, blend |
-| `transparency` | `_trans`, or `_alpha` | 0.0 | glass, blend |
-| `emissive` | `_emit` | 0.0 | emit |
+| `transparency` | `_trans`, or `_alpha` (older: `_weight` of a glass) | 0.0 | glass, blend |
+| `emissive` | `_emit` (older: `_weight` of an emitter) | 0.0 | emit |
 | `emission_power` | `_flux` | 0.0 | emit |
 | `ldr` | `_ldr` | 0.0 | emit |
 | `media_type` | `_media_type`, or `_media` (0–3) | absorb | glass, blend, media |
-| `density` | `_d` | 0.05 | glass, blend, media |
-| `phase` | `_g` (Henyey–Greenstein g) | 0.0 | glass, blend, media |
-| `weight` | `_weight` (older versions) | 1.0 | |
+| `density` | `_d` (0 when a `MATL` leaves it out) | 0.05 | glass, blend, media |
+| `phase` | `_g` (Henyey–Greenstein g; older: from `_g0`, `_g1`, `_gw`) | 0.0 | glass, blend, media |
+| `weight` | `_weight` as stored (older versions) | 1.0 | |
 | `attenuation` | `_att` (older versions) | 1.0 | |
-| `plastic` | `_plastic` (older versions) | false | |
+| `plastic` | `_plastic`, `_type _plastic` (older versions) | false | |
 
 Material types: `V4C_MATERIAL_DIFFUSE` (`_diffuse` or no `_type` key), `METAL` (`_metal`), `GLASS` (`_glass`),
 `EMIT` (`_emit`), `BLEND` (`_blend`, a mix of metal and glass parameters) and `MEDIA` (`_media`, a participating
@@ -87,6 +90,13 @@ medium / cloud without a surface). Media types: `V4C_MEDIA_ABSORB` (default), `S
 vox4c converts the latter. MagicaVoxel omits keys that are at their default, so a missing key means the default
 above. Every key is read regardless of the material type; which ones matter depends on the type (last column).
 Numbers are parsed locale-independently.
+
+Materials of older MagicaVoxel versions (0.98 `MATT` chunks, the `MATL` keys of 0.99.1 – 0.99.4) are converted the
+way MagicaVoxel 0.99.7 converts them when it opens such a file: the per-type `_weight` becomes `metallic`,
+`transparency` or `emissive`, a metal's `_spec` becomes `specular` + 1, the plastic type of 0.99.4 becomes a metal
+without metalness, the two phase lobes of 0.99.4 become one `phase`, and so on. This was checked against files
+re-saved by 0.99.7: all 256 materials come out identical. The rules are in part II of
+[docs/VoxFileFormat.md](docs/VoxFileFormat.md).
 
 `v4c_palette_texture()` writes a `num_materials x 1` RGBA8 texture; mesh texcoords sample the centre of the texel of
 their material, so a mesh can be rendered with a single material + palette texture as well as with submeshes.
@@ -118,8 +128,11 @@ is a row-major 3x3 matrix.
 
 MagicaVoxel stores `Transform → Group | Shape` chains. vox4c collapses them into `v4c_node`s: each node is a transform
 with children and / or a model. `nodes[0]` is the root. Shapes referenced from several places (MagicaVoxel instancing)
-are expanded into separate nodes that share the same `v4c_model`. Files without a scene graph get a synthesized root
-with one child per model.
+are expanded into separate nodes that share the same `v4c_model`. Files without a scene graph (saved by MagicaVoxel
+0.98.2 and older) get a synthesized root with one child per model (one animated child for a `PACK`
+animation), placed the way MagicaVoxel itself converts them: translation `(0, 0, floor(size.z / 2))`, so the model
+stands on the ground. The node tree, transforms, palette and meshes of such a file are then identical to those of
+the same file re-saved by a current MagicaVoxel.
 
 A node carries `transform_keys` (at least one) and `model_keys` (none if the node has no model), both sorted by frame.
 `v4c_transform` offers the rotation both as a matrix and as `quaternion * diag(scale)`, where `scale` is ±1 and only
@@ -169,7 +182,8 @@ system and scale, into `scene->render` and `scene->cameras`.
 
 | field | from | meaning |
 |---|---|---|
-| `render.background`, `has_background` | `_bg` `_color` | background colour |
+| `render.background`, `has_background` | `_bg` `_color` | background colour (the editor's) |
+| `render.show_background` | `_setting` `_bg_c` | the render shows the background colour instead of the sky |
 | `render.ambient_color`, `ambient_intensity`, `has_ambient` | `_uni` | uniform sky light |
 | `render.fov`, `aperture`, `projection`, `has_lens` | `_lens` (`_len` in older files) | lens of the render: field of view (degrees), depth of field, projection (see *Lenses*) |
 | `render.sun` | `_inf` | the sun, see below |
@@ -370,6 +384,34 @@ between two HTML comments that do not show when the README is rendered).
 | anim/Gomez.vox | 5656 | 3074 | 182.3 KB | 44.2 KB | 36.0 KB | 219.3 KB | 81.2 KB | 2.70x |
 | anim/T-Rex-m.vox | 9676 | 5666 | 311.8 KB | 75.6 KB | 66.4 KB | 378.7 KB | 142.5 KB | 2.66x |
 | anim/T-Rex.vox | 9676 | 5666 | 311.8 KB | 75.6 KB | 66.4 KB | 378.7 KB | 142.5 KB | 2.66x |
+| legacy/chr_knight_0.98.2.vox | 1980 | 1022 | 63.8 KB | 15.5 KB | 12.0 KB | 76.0 KB | 27.7 KB | 2.75x |
+| legacy/chr_knight_0.99.1.vox | 1980 | 1022 | 63.8 KB | 15.5 KB | 12.0 KB | 76.0 KB | 27.7 KB | 2.75x |
+| legacy/chr_knight_0.99.4.2.vox | 1980 | 1022 | 63.8 KB | 15.5 KB | 12.0 KB | 76.0 KB | 27.7 KB | 2.75x |
+| legacy/chr_knight_0.99.6.4.vox | 1980 | 1022 | 63.8 KB | 15.5 KB | 12.0 KB | 76.0 KB | 27.7 KB | 2.75x |
+| legacy/chr_knight_0.99.7.vox | 1980 | 1022 | 63.8 KB | 15.5 KB | 12.0 KB | 76.0 KB | 27.7 KB | 2.75x |
+| older/3x3x3.vox | 168 | 96 | 5.4 KB | 1.3 KB | 1.1 KB | 6.6 KB | 2.4 KB | 2.67x |
+| older/8x8x8.vox | 168 | 96 | 5.4 KB | 1.3 KB | 1.1 KB | 6.6 KB | 2.4 KB | 2.67x |
+| older/castle.vox | 4928 | 2758 | 158.8 KB | 38.5 KB | 32.3 KB | 191.1 KB | 70.8 KB | 2.70x |
+| older/chr_knight.vox | 1980 | 1022 | 63.8 KB | 15.5 KB | 12.0 KB | 76.0 KB | 27.7 KB | 2.75x |
+| older/chr_old.vox | 534 | 286 | 17.2 KB | 4.2 KB | 3.4 KB | 20.7 KB | 7.7 KB | 2.70x |
+| older/chr_rain.vox | 1858 | 953 | 59.9 KB | 14.5 KB | 11.2 KB | 71.2 KB | 25.8 KB | 2.76x |
+| older/chr_sword.vox | 1294 | 669 | 41.7 KB | 10.1 KB | 7.8 KB | 49.7 KB | 18.1 KB | 2.75x |
+| older/doom.vox | 21404 | 11304 | 689.8 KB | 167.2 KB | 132.5 KB | 823.6 KB | 301.1 KB | 2.74x |
+| older/ephtracy.vox | 1596 | 818 | 51.4 KB | 12.5 KB | 9.6 KB | 61.1 KB | 22.2 KB | 2.76x |
+| older/menger.vox | 682248 | 365040 | 21.47 MB | 5.21 MB | 4.18 MB | 25.65 MB | 9.38 MB | 2.73x |
+| older/monu1.vox | 4976 | 2939 | 160.4 KB | 38.9 KB | 34.4 KB | 194.9 KB | 73.4 KB | 2.65x |
+| older/monu10.vox | 20130 | 11657 | 648.7 KB | 157.3 KB | 136.6 KB | 785.4 KB | 293.9 KB | 2.67x |
+| older/monu9.vox | 4204 | 2336 | 135.5 KB | 32.8 KB | 27.4 KB | 163.0 KB | 60.3 KB | 2.70x |
+| older/nature.vox | 207744 | 114232 | 6.54 MB | 1.58 MB | 1.31 MB | 7.85 MB | 2.89 MB | 2.71x |
+| older/shelf.vox | 1620 | 929 | 52.2 KB | 12.7 KB | 10.9 KB | 63.1 KB | 23.6 KB | 2.68x |
+| older/teapot.vox | 85606 | 47173 | 2.69 MB | 668.8 KB | 552.8 KB | 3.23 MB | 1.19 MB | 2.71x |
+| older/anim/deer.vox | 10014 | 5094 | 322.7 KB | 78.2 KB | 59.7 KB | 383.8 KB | 139.3 KB | 2.75x |
+| older/anim/horse.vox | 13110 | 6795 | 422.5 KB | 102.4 KB | 79.6 KB | 503.2 KB | 183.1 KB | 2.75x |
+| older/anim/T-Rex.vox | 9676 | 5666 | 311.8 KB | 75.6 KB | 66.4 KB | 378.7 KB | 142.5 KB | 2.66x |
+| older/chr/chr_fox.vox | 2168 | 1173 | 69.9 KB | 16.9 KB | 13.7 KB | 83.7 KB | 30.8 KB | 2.72x |
+| older/chr/chr_gumi.vox | 1954 | 995 | 63.0 KB | 15.3 KB | 11.7 KB | 74.7 KB | 27.0 KB | 2.76x |
+| older/chr/chr_man.vox | 714 | 385 | 23.0 KB | 5.6 KB | 4.5 KB | 27.7 KB | 10.2 KB | 2.70x |
+| older/chr/chr_poem.vox | 1024 | 527 | 33.0 KB | 8.0 KB | 6.2 KB | 39.3 KB | 14.3 KB | 2.75x |
 <!-- vox4c:memory-table:end -->
 
 ## CMake

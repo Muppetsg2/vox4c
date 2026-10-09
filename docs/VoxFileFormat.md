@@ -6,6 +6,14 @@ and [MagicaVoxel-file-format-vox-extension.txt](https://github.com/ephtracy/voxe
 extended with what was found while implementing [vox4c](../README.md): the meaning of values the original files
 do not document, default values, and the conventions of the renderer, cameras and lenses.
 
+The document has two parts:
+
+- **Part I** describes the current format, as written by **MagicaVoxel 0.99.7** (file version **200**). A reader
+  that only needs files of the current editor can stop there.
+- **Part II** lists what files of older versions (0.98.2 to 0.99.6.4) do differently and how MagicaVoxel 0.99.7
+  converts them. It was established by saving the same model with every version and re-saving the old files
+  with 0.99.7.
+
 Where a statement goes beyond the original specification, its source is marked:
 
 | mark | meaning |
@@ -15,6 +23,8 @@ Where a statement goes beyond the original specification, its source is marked:
 | **[observed]** | seen in files written by MagicaVoxel, meaning not confirmed |
 
 ---
+
+# Part I. The current format (MagicaVoxel 0.99.7, version 200)
 
 ## 0. Conventions
 
@@ -77,15 +87,13 @@ models this way. A reader must reject bytes where `c0` or `c1` is 3 or `c0 == c1
 | # Bytes | Type | Value |
 |---|---|---|
 | 1×4 | char | id `'VOX '` : `'V' 'O' 'X' 'space'`, `'V'` is first |
-| 4 | int32 | version number: **150** (older files) or **200** (current MagicaVoxel) |
+| 4 | int32 | version number: **200** |
 | | Chunk | `'MAIN'` |
 
 ```
 Chunk 'MAIN'
 {
-    Chunk 'PACK'    : optional, only in files of 0.98.2
-
-    // models, in pairs; the pair index is the model id used by 'nSHP' and 'PACK'
+    // models, in pairs; the pair index is the model id used by 'nSHP'
     Chunk 'SIZE'
     Chunk 'XYZI'
     ...
@@ -95,9 +103,8 @@ Chunk 'MAIN'
     Chunk 'LAYR'                     : layers
 
     // palette and materials
-    Chunk 'RGBA'                     : optional, default palette otherwise
-    Chunk 'MATL'                     : up to 256
-    Chunk 'MATT'                     : deprecated
+    Chunk 'RGBA'                     : palette
+    Chunk 'MATL'                     : one per palette entry
 
     // editor and renderer
     Chunk 'rOBJ'                     : render settings, one per group of settings
@@ -110,7 +117,8 @@ Chunk 'MAIN'
 
 A reader must not depend on the order of the chunks after the models (for example `MATL` may come before or
 after `RGBA`) and must skip chunks it does not know, using the sizes in the chunk header. All of these chunks are
-children of `MAIN`; none of them has children of its own.
+children of `MAIN`; none of them has children of its own. Chunks that only older versions write (`PACK`, `MATT`)
+are described in part II.
 
 ---
 
@@ -135,18 +143,7 @@ Content size 0. Its children size covers the rest of the file.
 
 ---
 
-## 4. Chunk id 'PACK' : number of models (0.98.2 only)
-
-| # Bytes | Type | Value |
-|---|---|---|
-| 4 | int32 | number of SIZE / XYZI pairs |
-
-Files of 0.98.2 have no scene graph; with `PACK` the models are the frames of an animation (model *i* is frame
-*i*). Newer files never contain it. **[ogt]**
-
----
-
-## 5. Chunk id 'SIZE' : model size
+## 4. Chunk id 'SIZE' : model size
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -158,7 +155,7 @@ At most 256 per axis (voxel coordinates are single bytes).
 
 ---
 
-## 6. Chunk id 'XYZI' : model voxels, paired with the preceding SIZE chunk
+## 5. Chunk id 'XYZI' : model voxels, paired with the preceding SIZE chunk
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -171,7 +168,7 @@ At most 256 per axis (voxel coordinates are single bytes).
 
 ---
 
-## 7. Chunk id 'RGBA' : palette
+## 6. Chunk id 'RGBA' : palette
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -185,38 +182,13 @@ colour of index 255 = entry 254
 entry 255           : not used (index 0 is "empty")
 ```
 
-Without an `RGBA` chunk the default palette applies (appendix A).
+MagicaVoxel 0.99.7 always writes this chunk. Without it the default palette applies (appendix A).
 
 ---
 
-## 8. Chunk id 'MATT' : material, deprecated
+## 7. Scene graph
 
-Written by 0.98; replaced by `MATL`. A `MATL` for the same index takes precedence.
-
-| # Bytes | Type | Value |
-|---|---|---|
-| 4 | int32 | id, the palette index 1..255 |
-| 4 | int32 | type: 0 diffuse, 1 metal, 2 glass, 3 emissive |
-| 4 | float | weight: blend for metal, glass, emissive (0.0, 1.0] |
-| 4 | int32 | property bits |
-| 4 × N | float | one value for each set bit 0..6, in bit order |
-
-| bit | property |
-|---|---|
-| 0 | plastic |
-| 1 | roughness |
-| 2 | specular |
-| 3 | IOR (range not documented; values below 1 are treated as `n − 1` by vox4c) |
-| 4 | attenuation |
-| 5 | power |
-| 6 | glow |
-| 7 | total power (a flag without a value, per the 0.98 specification) |
-
----
-
-## 9. Scene graph
-
-Newer files describe the scene with three node types, all identified by an `int32` node id that is unique in the
+The scene is described with three node types, all identified by an `int32` node id that is unique in the
 file:
 
 ```
@@ -235,7 +207,7 @@ file:
 - The same `nSHP` (or `nGRP`) can be the child of several transforms: this is how MagicaVoxel instances a model.
   The graph is therefore a DAG; a reader that builds a tree has to copy the shared part. Cycles do not occur in
   valid files but a reader should detect them.
-- Files without any `nTRN` (older versions) place every model at the origin, unrotated.
+- MagicaVoxel 0.99.7 always writes a scene graph. Files without one are older (part II, L.2).
 
 **Placing a model.** The world matrix of a node is the product of the transforms from the root down,
 `W = T(t_root) · R_root · … · T(t_node) · R_node`. A model is centred on its **pivot** `floor(size / 2)`: the voxel
@@ -250,7 +222,7 @@ it. **[ogt]**
 
 ---
 
-## 10. Chunk id 'nTRN' : transform node
+## 8. Chunk id 'nTRN' : transform node
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -293,7 +265,7 @@ The animation of the whole file has `max(_f) + 1` frames; `META` may store the r
 
 ---
 
-## 11. Chunk id 'nGRP' : group node
+## 9. Chunk id 'nGRP' : group node
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -304,7 +276,7 @@ The animation of the whole file has `max(_f) + 1` frames; `META` may store the r
 
 ---
 
-## 12. Chunk id 'nSHP' : shape node
+## 10. Chunk id 'nSHP' : shape node
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -326,25 +298,29 @@ shown (no interpolation, the same looping rules). A shape with one model shows i
 
 ---
 
-## 13. Chunk id 'MATL' : material
+## 11. Chunk id 'MATL' : material
 
 | # Bytes | Type | Value |
 |---|---|---|
 | 4 | int32 | material id: the palette index it applies to |
 | | DICT | material properties |
 
-The ids seen range from 0 to 256; id 0 and id 256 both refer to the unused index 0 (`id & 0xFF`). Every key can
-appear with every type; the last column tells which types MagicaVoxel uses it for. The defaults are the values of
-an untouched material: `_rough`, `_ior`, `_ri` and `_d` are always written, the other keys only once they differ
-from their default (so a metal that was never edited has no `_metal` key). This was established from files
-containing every combination of type and medium that the editor offers.
+MagicaVoxel 0.99.7 writes 256 chunks with the ids 1..256; id 256 is the unused colour index 0 (`id & 0xFF`). It
+ignores the id 0 that 0.99.1 writes (part II, L.4). Every key can appear with every type; the last column tells which types MagicaVoxel
+uses it for. A key is left out when it has the value of the "default" column (so a metal that was never edited
+has no `_metal` key); `_rough`, `_ior` and `_ri` are always written. This was established from files containing
+every combination of type and medium that the editor offers.
+
+`_d` is the exception: it is left out when it is **0**, while a new palette starts with 0.05 and writes it. A
+material without a `MATL` chunk therefore has 0.05, but a `MATL` without `_d` has 0 (seen in files whose
+materials came from older versions, and in a converted glass with `_att` 0). **[converted]**
 
 | key | value | default | used by |
 |---|---|---|---|
 | `_type` | `_diffuse`, `_metal`, `_glass`, `_emit`, `_blend`, `_media` | diffuse (also when missing) | |
 | `_rough` | roughness | 0.1 | all surfaces |
 | `_metal` | metalness | 0 | metal, blend |
-| `_sp` | specular, 1..2 (older files: `_spec`) | 1 | metal, blend |
+| `_sp` | specular, 0..2 | 1 | metal, blend |
 | `_ior` | index of refraction **minus 1** | 0.3 | glass, blend |
 | `_ri` | index of refraction (always `_ior + 1`) | 1.3 | glass, blend |
 | `_trans` | transparency; `_alpha` holds the same value | 0 | glass, blend |
@@ -352,10 +328,9 @@ containing every combination of type and medium that the editor offers.
 | `_flux` | emission power exponent | 0 | emit |
 | `_ldr` | low dynamic range emission | 0 | emit |
 | `_media_type` | `_scatter`, `_emit`, `_sss`; missing = absorb | absorb | glass, blend, media |
-| `_media` | the same as a number: 0 absorb, 1 scatter, 2 emit, 3 sss | 0 | glass, blend, media |
-| `_d` | density of the medium | 0.05 | glass, blend, media |
+| `_media` | the same as a number: 0 absorb, 1 scatter, 2 emit, 3 sss (written together with `_media_type`) | 0 | glass, blend, media |
+| `_d` | density of the medium, 0..0.1 | 0 when left out (a new palette: 0.05) | glass, blend, media |
 | `_g` | phase: scattering anisotropy (Henyey–Greenstein g) | 0 | glass, blend, media |
-| `_weight`, `_att`, `_plastic` | older versions only | 1, 1, 0 | |
 
 Material types:
 
@@ -370,7 +345,7 @@ Material types:
 
 ---
 
-## 14. Chunk id 'LAYR' : layer
+## 12. Chunk id 'LAYR' : layer
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -384,40 +359,41 @@ Material types:
 | `_hidden` | 0 / 1: hides every node in this layer |
 | `_color` | `"r g b"`, the layer colour in the editor |
 
+MagicaVoxel 0.99.7 writes 32 layers (16 when it re-saves a file of an older version): 0..7 named `"0"`..`"7"`
+(or without a name) with their own colours, the others without a name and with the colour `150 150 150`.
+
 A node is visible when neither it, nor any of its ancestors, nor the layers of any of them is hidden.
 
 ---
 
-## 15. Chunk id 'rOBJ' : render settings
+## 13. Chunk id 'rOBJ' : render settings
 
 | # Bytes | Type | Value |
 |---|---|---|
 | | DICT | settings; the key `_type` tells which group |
 
-One chunk per group. The groups marked **[render]** were measured; for the others
-the table lists the keys found in files and the meaning suggested by their names and the editor.
+MagicaVoxel 0.99.7 writes the 15 groups below, one chunk each. The groups marked **[render]** were measured; for
+the others the table lists the keys found in files and the meaning suggested by their names and the editor.
 
 | `_type` | keys | meaning |
 |---|---|---|
-| `_inf` | `_i`, `_k`, `_angle`, `_area`, `_disk` | the sun, see 15.1 **[render]** |
+| `_inf` | `_i`, `_k`, `_angle`, `_area`, `_disk` | the sun, see 13.1 **[render]** |
 | `_uni` | `_i`, `_k` | uniform sky light: intensity, colour `"r g b"` |
 | `_ibl` | `_path`, `_i`, `_angle`, `_rot` | image based lighting: HDR file name, intensity, rotation |
 | `_atm` | `_ray_d`, `_ray_k`, `_mie_d`, `_mie_k`, `_mie_g`, `_o3_d`, `_o3_k` | atmosphere (Rayleigh, Mie, ozone) |
-| `_rayleigh`, `_mie` | `_d`, `_k` (and `_g`) | atmosphere, older files |
 | `_env` | `_mode` | which environment light is used **[observed]**, values not mapped |
-| `_fog_uni` / `_fog` | `_d`, `_k`, `_g` / `_d`, `_k`, `_enable` | fog: density, colour, phase |
-| `_lens` | `_proj`, `_fov`, `_aperture`, `_blade_n`, `_blade_r` | camera lens, see 15.2 **[render]** |
-| `_len` | `_fov`, `_dof`, `_exp`, `_vig`, `_sg`, `_gam`, `_blade_n`, `_blade_r` | lens and film, older files |
+| `_fog_uni` | `_d`, `_k`, `_g` | fog: density, colour, phase |
+| `_lens` | `_proj`, `_fov`, `_aperture`, `_blade_n`, `_blade_r` | camera lens, see 13.2 **[render]** |
 | `_film` | `_expo`, `_vig`, `_aces`, `_gam` | exposure, vignette, ACES tone mapping, gamma |
 | `_bloom` | `_mix`, `_scale`, `_aspect`, `_threshold` | bloom |
-| `_ground` | `_color`, `_hor`, `_enable` | ground plane |
-| `_bg` | `_color`, `_enable` | background colour |
-| `_edge` | `_color`, `_width`, `_enable` | edge outlines |
-| `_grid` | `_color`, `_spacing`, `_width`, `_display`, `_enable` | grid |
+| `_ground` | `_color`, `_hor` | ground plane |
+| `_bg` | `_color` | background colour of the editor; the render shows it when `_setting` `_bg_c` is 1 |
+| `_edge` | `_color`, `_width` | edge outlines |
+| `_grid` | `_color`, `_spacing`, `_width`, `_display` | grid |
 | `_bounce` | `_diffuse`, `_specular`, `_scatter`, `_energy` | path tracer bounces |
-| `_setting` | `_ground`, `_grid`, `_edge`, `_bg_c`, `_bg_a`, `_aa`, `_cell`, `_scale`, `_sw` | switches of the render tab **[observed]** |
+| `_setting` | `_ground`, `_grid`, `_edge`, `_bg_c`, `_bg_a`, `_aa`, `_cell`, `_scale`, `_sw` | switches of the render tab: `_bg_c` 1 shows the background colour in the render instead of the sky (checked by toggling it in the editor); the others **[observed]** |
 
-### 15.1 The sun (`_type` = `_inf`) **[render]**
+### 13.1 The sun (`_type` = `_inf`) **[render]**
 
 | key | value |
 |---|---|
@@ -439,16 +415,14 @@ the table lists the keys found in files and the meaning suggested by their names
   apparent diameter of about **`_area × 43.5°`** (the constant comes from ogt_vox; the penumbra in a render fits
   it within about ±1.5°).
 
-### 15.2 The lens (`_type` = `_lens`) **[render]**
+### 13.2 The lens (`_type` = `_lens`) **[render]**
 
 | key | value |
 |---|---|
 | `_proj` | projection: **0** perspective, **1** stereographic, **2** panorama |
 | `_fov` | field of view in degrees, **vertical** |
-| `_aperture` | depth of field (older `_len`: `_dof`) |
+| `_aperture` | depth of field |
 | `_blade_n`, `_blade_r` | aperture blades: count, rotation |
-
-Older files have no `_proj`; their `_len` group has a stereographic switch `_sg` (0 / 1).
 
 The fov of the render is this `_fov`; the fov stored in a camera slot (`rCAM`) is not necessarily the same.
 
@@ -476,7 +450,7 @@ With the camera basis F (forward), U (up) and R = F × U (right), all unit vecto
 
 ---
 
-## 16. Chunk id 'rCAM' : camera slot
+## 14. Chunk id 'rCAM' : camera slot
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -515,7 +489,7 @@ outside the scene.
 
 ---
 
-## 17. Chunk id 'NOTE' : palette notes
+## 15. Chunk id 'NOTE' : palette notes
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -527,7 +501,7 @@ MagicaVoxel writes 32 names, presumably one for each row of 8 colours of the pal
 
 ---
 
-## 18. Chunk id 'IMAP' : palette display order
+## 16. Chunk id 'IMAP' : palette display order
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -539,7 +513,7 @@ without it; it only tells in which order the editor shows them. **[ogt]**
 
 ---
 
-## 19. Chunk id 'META' : metadata **[observed]**
+## 17. Chunk id 'META' : metadata **[observed]**
 
 | # Bytes | Type | Value |
 |---|---|---|
@@ -551,7 +525,7 @@ without it; it only tells in which order the editor shows them. **[ogt]**
 
 ---
 
-## 20. Notes for readers
+## 18. Notes for readers
 
 - Check every size against the remaining bytes; skip unknown chunks by their sizes.
 - Ignore unknown dictionary keys; treat a missing key as its default.
@@ -559,6 +533,237 @@ without it; it only tells in which order the editor shows them. **[ogt]**
 - When the same chunk appears twice for one id (`MATL`, `rCAM`), the later one wins.
 - A scene graph may reference missing nodes or models; skip those references.
 - Limit the depth and the total size when expanding shared nodes: a small file can describe a very large tree.
+- Do not decide anything from the version number in the header (part II, L.1): look at which chunks and keys
+  are present.
+
+---
+
+# Part II. Older files
+
+Everything in part I applies to older files as well, except for the differences below. They were established by
+saving the same model (`chr_knight`) with MagicaVoxel 0.98.2, 0.99.1, 0.99.4.2, 0.99.6.4 and 0.99.7, by opening the
+files of 0.98.2, 0.99.1 and 0.99.4.2 in 0.99.7 and saving them again (which shows how 0.99.7 itself converts
+them), with three `PACK` animations of 0.98.2 (one with frames of different sizes), and with the files of the
+original model collection, which predate 0.98.2. The versions 0.99.2, 0.99.3 and 0.99.5 are no longer available
+and were not examined: "0.99.1 – 0.99.4" means "seen in both, assumed in between".
+
+Marks used in this part, in addition to those of part I:
+
+| mark | meaning |
+|---|---|
+| **[converted]** | what MagicaVoxel 0.99.7 writes when it re-saves the older file |
+
+---
+
+## L.1 The version number
+
+| MagicaVoxel | version in the header |
+|---|---|
+| before 0.98.2 | 150 |
+| 0.98.2 | 150 |
+| 0.99.1 | 150 |
+| 0.99.4.2 | 150 |
+| 0.99.6.4 | 150 |
+| 0.99.7 | **200** |
+
+The number only changed with 0.99.7, although the format changed a lot before that. A reader must decide by the
+chunks and keys it finds, never by the version number. What each version writes:
+
+| | before 0.98.2 | 0.98.2 | 0.99.1 | 0.99.4.2 | 0.99.6.4 | 0.99.7 |
+|---|---|---|---|---|---|---|
+| `PACK` | yes | yes | – | – | – | – |
+| `SIZE` / `XYZI` | yes | yes | yes | yes | yes | yes |
+| scene graph (`nTRN` …) | – | – | yes | yes | yes | yes |
+| `LAYR` | – | – | 8, name only | 8, name only | 32, name and colour | 32 (16 when re-saving an older file) |
+| `RGBA` | only for a custom palette | yes | yes | yes | yes | yes |
+| `MATT` | – | edited materials only | – | – | – | – |
+| `MATL` | – | – | 256, ids 0..255 | 256, ids 1..256 | 256, ids 1..256 | 256, ids 1..256 |
+| `rOBJ` | – | – | 12 groups (L.6) | 14 groups (L.6) | 15 groups | 15 groups |
+| `rCAM` | – | – | – | – | 10 slots | 10 slots |
+| `NOTE` | – | – | – | – | yes | yes |
+| `META` | – | – | – | – | – | `_anim_range` |
+
+The bytes of `SIZE`, `XYZI` and the used `RGBA` entries are identical in all versions and survive every
+conversion unchanged. The unused last `RGBA` entry (colour index 0) is `0 0 0 255` in files before 0.98.2 and
+`0 0 0 0` afterwards.
+
+---
+
+## L.2 Files without a scene graph (0.98.2 and older)
+
+### Chunk id 'PACK' : number of models
+
+| # Bytes | Type | Value |
+|---|---|---|
+| 4 | int32 | number of SIZE / XYZI pairs |
+
+It comes first in `MAIN`. With more than one model the models are the frames of an animation: model *i* is
+frame *i*. The frames may have different sizes (`horse`: 31×7×24, 32×7×24, 31×7×25, 31×8×24).
+
+### Conversion **[converted]**
+
+0.99.7 turns such a file into
+
+```
+nTRN 0 → nGRP 1 → nTRN 2 (_t = "0 0 floor(size.z / 2)", layer 0) → nSHP 3
+```
+
+so the model stands on the ground, its lowest voxel layer at z = 0. With one model, `nSHP` holds it without
+attributes. With a `PACK` animation of *N* models, `nSHP` gets the node attribute `_frm_id 0` and the models
+0..N−1 with `_f` = 0..N−1, without `_loop`: one model per frame, the last one held after the end. Every frame
+keeps its own size and is centred on its own pivot (part I, 7); the translation uses the height of frame 0
+(the files examined do not tell frame 0 from the tallest frame: 24 and 25 voxels both give 12).
+
+### Palette
+
+Files written before 0.98.2 contain an `RGBA` chunk only when the palette was changed; without it the default
+palette (appendix A) applies. 0.98.2 always writes it.
+
+---
+
+## L.3 Chunk id 'MATT' : material (0.98.2)
+
+0.98.2 writes one chunk for each material that was changed in the editor; the others are diffuse with default
+values. A `MATL` for the same index takes precedence.
+
+| # Bytes | Type | Value |
+|---|---|---|
+| 4 | int32 | id: the colour index 1..255 |
+| 4 | int32 | type: 0 diffuse, 1 metal, 2 glass, 3 emissive |
+| 4 | float | weight: diffuse 1.0; metal, glass, emissive (0.0, 1.0] |
+| 4 | int32 | property bits |
+| 4 × N | float | one value for each set bit **0..6**, in bit order |
+
+| bit | property | value |
+|---|---|---|
+| 0 | plastic | 0.0 / 1.0 |
+| 1 | roughness | 0..1 |
+| 2 | specular | 0..1, default 0.5 |
+| 3 | IOR | `n − 1`, like `_ior` (e.g. 0.505 for n = 1.505) **[observed]** |
+| 4 | attenuation | 0..1 |
+| 5 | power | e.g. 2 |
+| 6 | glow | 0..1 |
+| 7 | total power | **no value**: a flag only (a chunk with bits `0xef` has 6 floats) **[observed]** |
+
+The properties are those of the `MATL` keys of 0.99.1 (`_plastic`, `_rough`, `_spec`, `_ior`, `_att`, `_flux`,
+`_glow`, `_unit`) and the weight is `_weight`.
+
+**0.99.7 ignores `MATT` [converted]:** re-saving a 0.98.2 file with a glass, a metal and two emissive materials
+gives 256 default diffuse materials. vox4c still reads `MATT` and converts it by the rules of L.4 (L.8).
+
+---
+
+## L.4 Chunk id 'MATL' in 0.99.1 – 0.99.4
+
+**Ids.** 0.99.1 numbers the 256 chunks **0..255**, every version from 0.99.4 on **1..256**. In both the id is the
+colour index (0.99.1 writes its non-default materials under the ids of the used colours). 0.99.7 ignores the id 0
+of a 0.99.1 file (the unused index 0 then gets the defaults of a new palette) and reads the ids 1..256 as usual.
+
+**Keys.** Every chunk carries all keys of its version, edited or not (a reader can recognise these chunks by
+`_weight`, which no later version writes):
+
+| version | keys written |
+|---|---|
+| 0.99.1 | `_type`, `_weight`, `_rough`, `_spec`, `_ior`; `_plastic` (diffuse); `_flux`, `_glow`, `_unit` (emit); `_att` (glass) |
+| 0.99.4.2 | `_type`, `_weight`, `_rough`, `_spec`, `_spec_p`, `_ior`, `_att`, `_g0`, `_g1`, `_gw`, `_flux`, `_ldr` |
+| 0.99.6.4 | the current keys (part I, 11), but `_media` without `_media_type` and `_ior` without `_ri` |
+
+**Types.** 0.99.1 has `_diffuse`, `_metal`, `_glass`, `_emit`; plastic is a switch of the diffuse type
+(`_plastic 1`). 0.99.4 adds `_plastic` and `_media` as types of their own. `_blend` appears with 0.99.6.
+
+**Conversion [converted].** Comparing each material of the 0.99.1 and 0.99.4.2 files with the same material after
+0.99.7 re-saved them gives these rules; `_rough` and `_ior` are kept as they are:
+
+| old material | becomes |
+|---|---|
+| `_diffuse` | `_diffuse`; `_spec` is dropped |
+| `_diffuse` with `_plastic 1` (0.99.1) | a plain `_diffuse`: `_plastic` and `_spec` are dropped |
+| `_metal` | `_metal` with `_metal` = `_weight` and **`_sp` = `_spec` + 1** (0.642105 → 1.6421, 0.63 → 1.63) |
+| `_glass` | `_glass` with `_trans` = `_alpha` = `_weight` and **`_d` from `_att`** (below); `_spec` is dropped |
+| `_emit` | `_emit` with `_emit` = `_weight`; `_flux` and `_ldr` kept; **`_glow` and `_unit` are dropped** |
+| `_plastic` (0.99.4) | **`_metal` without `_metal`** (metalness 0) and **`_ior` = `_spec_p`** (0.7 → `_ior 0.7`, `_ri 1.7`); `_weight` and `_spec` are dropped |
+| `_media` (0.99.4) | `_media` with `_media_type _scatter` and **`_d` from `_weight`** (below) |
+| `_g0`, `_g1`, `_gw` (0.99.4, all types) | **`_g` = `_gw` · `_g1` + (1 − `_gw`) · `_g0`** (defaults −0.5, 0.8, 0.7 give 0.41; −0.25, 0.9, 0.53 give 0.3595) |
+
+**Density.** The `_d` of a converted medium follows from its `_weight`, that of a converted glass from its `_att`,
+both as **`_d = −ln(1 − 0.4 · x)`, capped at 0.1** (the end of the density slider of 0.99.7). Exact to the printed
+digits for every value examined:
+
+| x | 0 | 0.01 | 0.05 | 0.1 | 0.2 | 0.22 | 0.25 … 1 |
+|---|---|---|---|---|---|---|---|
+| medium (`_weight`) | – | 0.00400803 | 0.0202027 | 0.040822 | 0.0833816 | 0.0921153 | 0.1 (0.25, 0.3, 0.33, 0.5, 1) |
+| glass (`_att`) | 0 (no `_d`) | | 0.0202027 | 0.040822 | 0.0833816 | | 0.1 (0.34, 0.41, 0.5, 1) |
+
+Read as a transmittance `1 − 0.4 · x`, this is the matching optical density. The cap is reached at x ≈ 0.238. A
+medium with `_weight` 0 cannot be saved by 0.99.4 (it becomes diffuse); vox4c returns 0 for it. `_att` of the other
+types is dropped.
+
+**0.99.6.4.** Writes `_media` (a number, part I, 11) instead of `_media_type`, and `_ior` without `_ri`.
+
+---
+
+## L.5 Chunk id 'LAYR' in 0.99.1 – 0.99.4
+
+8 layers (ids 0..7) with only a `_name` (`"0"`..`"7"`), no `_color`. The coloured layers of part I, 12 appear
+with 0.99.6.
+
+---
+
+## L.6 Chunk id 'rOBJ' in 0.99.1 – 0.99.4
+
+**0.99.1** writes 12 groups, several of them under names that were replaced later:
+
+| `_type` | keys | in 0.99.7 **[converted]** |
+|---|---|---|
+| `_inf` | `_i`, `_k`, `_angle`, `_area` (no `_disk`) | kept, `_disk 0` added |
+| `_uni` | `_i`, `_k` | kept |
+| `_rayleigh` | `_d`, `_k` | dropped: `_atm` gets its defaults |
+| `_mie` | `_d`, `_k`, `_g` | dropped: `_atm` gets its defaults |
+| `_fog` | `_d`, `_k`, `_enable` | dropped: `_fog_uni` gets its defaults (density 0) |
+| `_len` | `_fov`, `_dof`, `_exp`, `_vig`, `_sg`, `_gam`, `_blade_n`, `_blade_r` | dropped: `_lens` and `_film` get their defaults |
+| `_bloom` | `_mix`, `_scale`, `_aspect`, `_threshold` | kept |
+| `_aces` | (none) | dropped |
+| `_ground` | `_color`, `_enable` | colour kept |
+| `_bg` | `_color`, `_enable` | colour kept; `_enable 0` gives `_setting` `_bg_c 0` (also its default) |
+| `_edge` | `_color`, `_width`, `_enable` | kept |
+| `_grid` | `_color`, `_spacing`, `_width`, `_display`, `_enable` | kept |
+
+So 0.99.7 keeps only the groups whose name did not change and resets the others; it converts no render setting.
+
+- In `_len`, `_sg` = 1 selects the stereographic projection (`_proj` 1); a panorama projection did not exist yet.
+- `_bg` `_enable` is the switch that later became `_setting` `_bg_c`: 1 shows the background colour in the
+  render.
+
+**0.99.4.2** already writes the current groups (part I, 13) except `_bounce`, and `_ibl` without `_path`; 0.99.7
+keeps them all. **0.99.6.4** writes `_ibl` with `_rot`, 0.99.7 with `_angle` (two values).
+
+---
+
+## L.7 Chunks 'rCAM' and 'NOTE'
+
+Written from 0.99.6 on; files of 0.99.4 and older have no camera slots and no palette notes. 0.99.7 writes ten
+default slots when it re-saves them.
+
+---
+
+## L.8 What vox4c does with older files
+
+vox4c returns older files the way MagicaVoxel 0.99.7 shows them after opening them: for the 0.99.1 and 0.99.4.2
+files and the three animations above, the scene, the frames, the palette, all 256 materials and the background
+switch are identical to those of their 0.99.7 re-saves. Where 0.99.7 throws information away entirely (`MATT`,
+`_len`), vox4c keeps it:
+
+| difference | handling |
+|---|---|
+| no scene graph, `PACK` | the graph of L.2 |
+| no `RGBA` | default palette |
+| `MATT` | **read** and converted by the rules of L.4 (unless a `MATL` exists for the index), unlike 0.99.7, which ignores it |
+| `MATL` id 0 (0.99.1) | ignored, like 0.99.7 |
+| `MATL` with `_weight` | converted by the rules of L.4; the raw `_weight`, `_att` and plastic switch stay in `weight`, `attenuation` and `plastic` |
+| `_len` | **read** (lens: `_fov`, `_dof` as aperture, `_sg` as stereographic), unlike 0.99.7, which resets the lens |
+| `_bg _enable` | `show_background`, like `_setting _bg_c` |
+| `_rayleigh`, `_mie`, `_fog`, `_aces`, film keys | not read (like their current counterparts) |
+| `LAYR` without `_color` | white |
 
 ---
 

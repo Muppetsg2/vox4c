@@ -4,6 +4,8 @@
     Features
       * Models (SIZE/XYZI), palette (RGBA), materials (MATL, legacy MATT)
       * Full scene graph (nTRN/nGRP/nSHP) collapsed into an engine friendly node tree
+	  * Files of every MagicaVoxel version (0.98 and older to 0.99.7): scene graph
+        synthesized like MagicaVoxel does, old material keys and MATT converted
       * Layers (LAYR) with name / colour / hidden flag
       * Render settings (rOBJ: background, sun, sky light, lens) and camera slots (rCAM)
       * Animation: transform and model keyframes (_f), looping (_loop),
@@ -234,22 +236,25 @@ typedef struct v4c_material
 {
     v4c_color         color;         /* palette colour                                        */
     uint8_t           palette_index; /* index in the original 256 colour palette              */
-    bool              plastic;       /* _plastic (older versions)              default false   */
+    bool              plastic;       /* older _plastic / _type _plastic        default false   */
     v4c_material_type type;          /* _type                                  default diffuse */
     float             roughness;     /* _rough                                 default 0.1     */
-    float             metallic;      /* _metal                                 default 0       */
-    float             specular;      /* _sp || _spec                           default 1       */
+    float             metallic;      /* _metal (older: _weight of a metal)     default 0       */
+    float             specular;      /* _sp (older metal: _spec + 1)           default 1       */
     float             ior;           /* index of refraction:                   default 1.3     */
                                      /* _ior + 1 || _ri (the file's _ior is n - 1)             */
-    float          transparency;     /* _trans || _alpha                       default 0       */
-    float          emissive;         /* _emit  (emission strength)             default 0       */
+    float          transparency;     /* _trans || _alpha (older: _weight)      default 0       */
+    float          emissive;         /* _emit (older: _weight), strength       default 0       */
     float          emission_power;   /* _flux  (power exponent)                default 0       */
     float          ldr;              /* _ldr   (low dynamic range emission)    default 0       */
     v4c_media_type media_type;       /* _media_type || _media                  default absorb  */
-    float          density;          /* _d     (medium density)                default 0.05    */
+    float          density;          /* _d (medium density; 0 if left out)     default 0.05    */
     float          phase;            /* _g     (scattering anisotropy,         default 0       */
                                      /*         Henyey-Greenstein g, -1..1)                    */
-    /* keys written only by older MagicaVoxel versions (and plastic above) */
+                                     /* older files are converted like MagicaVoxel 0.99.7     */
+                                     /* does it, see docs/vox-file-format.md, part II          */
+    /* raw values of keys written only by older MagicaVoxel versions; the ones
+       with a current equivalent are also converted into the fields above */
     float weight;      /* _weight                                default 1       */
     float attenuation; /* _att                                   default 1       */
 } v4c_material;
@@ -442,7 +447,8 @@ typedef struct v4c_render_settings
     v4c_projection projection;        /* _lens _proj (_len: _sg = stereographic)           */
     int32_t        projection_index;  /* _proj as stored                                   */
     bool           has_ambient;
-    bool           has_background;
+    bool           has_background;  /* _bg: a background colour is stored                */
+    bool           show_background; /* _setting _bg_c (_bg _enable): the render shows it */
     bool           has_lens;
 } v4c_render_settings;
 
@@ -1321,6 +1327,122 @@ static void v4c__chunk_rgba(v4c__ctx* c, v4c__reader* r)
     c->has_palette  = 1;
 }
 
+/* Materials of MagicaVoxel 0.98 (MATT) and 0.99.1 - 0.99.4 (MATL with _weight),
+   converted the way MagicaVoxel 0.99.7 converts them when it opens such a file
+   (checked on files re-saved by 0.99.7, see docs/vox-file-format.md, L.4):
+     _weight          metal -> _metal, glass -> _trans, emit -> _emit
+     _spec            metal: _sp = _spec + 1; ignored for the other types
+     _type _plastic   metal with _metal 0 and _ior = _spec_p
+     glass, _media    _d from _att (glass) or _weight (media), see v4c__legacy_density;
+                      _media becomes a scattering medium
+     _g0, _g1, _gw    _g = _gw * _g1 + (1 - _gw) * _g0
+     _glow, _unit     dropped (like _plastic 1 of 0.99.1, kept in 'plastic')
+   A current key in the same chunk always wins. */
+typedef struct v4c__legacy_mat
+{
+    float weight, spec, spec_p, att, g0, g1, gw;
+    int   has_weight, has_spec, has_spec_p, has_att, has_lobes, plastic_type;
+    int   has_sp, has_d, has_g; /* current keys present in the same chunk */
+} v4c__legacy_mat;
+
+/* Density of a converted medium (from _weight) or glass (from _att), as 0.99.7
+   computes it: d = -ln(1 - 0.4 x), capped at 0.1, the end of its density slider.
+   Exact for every medium and glass re-saved by 0.99.7 (e.g. 0.01, 0.05, 0.1,
+   0.2, 0.22 -> 0.00400803, 0.0202027, 0.040822, 0.0833816, 0.0921153; 0.25 to
+   1 -> 0.1; glass _att 0 -> 0). No libm: with y = x / (2 - x),
+   -ln(1 - x) = 2 atanh(y), and y < 0.05 below the cap. */
+static float v4c__legacy_density(float w)
+{
+    double x, y, y2;
+    if (!(w > 0.0f))
+        return 0.0f;
+
+    x = 0.4 * (double)w;
+    if (x >= 0.0951626) /* 1 - e^-0.1 */
+        return 0.1f;
+
+    y  = x / (2.0 - x);
+    y2 = y * y;
+    return (float)(2.0 * y * (1.0 + y2 * (1.0 / 3.0 + y2 * (1.0 / 5.0 + y2 * (1.0 / 7.0)))));
+}
+
+static void v4c__legacy_material(v4c_material* m, const v4c__legacy_mat* l)
+{
+    if (l->plastic_type)
+    {
+        m->type     = V4C_MATERIAL_METAL;
+        m->plastic  = true;
+        m->metallic = 0.0f;
+        if (l->has_spec_p)
+            m->ior = 1.0f + l->spec_p;
+    }
+    else if (l->has_weight)
+    {
+        if (m->type == V4C_MATERIAL_METAL)
+            m->metallic = l->weight;
+        else if (m->type == V4C_MATERIAL_GLASS)
+            m->transparency = l->weight;
+        else if (m->type == V4C_MATERIAL_EMIT)
+            m->emissive = l->weight;
+    }
+
+    if (m->type == V4C_MATERIAL_METAL && !l->plastic_type && l->has_spec && !l->has_sp)
+        m->specular = 1.0f + l->spec;
+
+    if (m->type == V4C_MATERIAL_GLASS && l->has_att && !l->has_d)
+        m->density = v4c__legacy_density(l->att);
+
+    if (m->type == V4C_MATERIAL_MEDIA)
+    {
+        m->media_type = V4C_MEDIA_SCATTER;
+        if (!l->has_d)
+            m->density = v4c__legacy_density(l->weight);
+    }
+
+    if (l->has_lobes && !l->has_g)
+        m->phase = l->gw * l->g1 + (1.0f - l->gw) * l->g0;
+}
+
+static float v4c__dict_float(v4c__ctx* c, const char* key, float fallback, int* found)
+{
+    const v4c__str* v = v4c__dict_get(c, key);
+    *found            = v != NULL;
+    return v ? v4c__parse_float(*v, fallback) : fallback;
+}
+
+/* MATL of 0.99.1 - 0.99.4: recognised by the _weight key, which they always write */
+static void v4c__matl_legacy_keys(v4c__ctx* c, v4c_material* m)
+{
+    const v4c__str* type = v4c__dict_get(c, "_type");
+    v4c__legacy_mat l;
+    int             has_g0, has_g1, has_gw, modern_weight;
+    if (v4c__dict_get(c, "_weight") == NULL)
+        return;
+
+    memset(&l, 0, sizeof(l));
+    if (m->type == V4C_MATERIAL_METAL)
+        modern_weight = v4c__dict_get(c, "_metal") != NULL;
+    else if (m->type == V4C_MATERIAL_GLASS)
+        modern_weight = v4c__dict_get(c, "_trans") != NULL || v4c__dict_get(c, "_alpha") != NULL;
+    else
+        modern_weight = v4c__dict_get(c, "_emit") != NULL;
+
+    l.weight       = v4c__dict_float(c, "_weight", 1.0f, &l.has_weight);
+    l.has_weight   = l.has_weight && !modern_weight;
+    l.spec         = v4c__dict_float(c, "_spec", 0.5f, &l.has_spec);
+    l.spec_p       = v4c__dict_float(c, "_spec_p", 0.5f, &l.has_spec_p);
+    l.att          = v4c__dict_float(c, "_att", 0.0f, &l.has_att);
+    l.g0           = v4c__dict_float(c, "_g0", 0.0f, &has_g0);
+    l.g1           = v4c__dict_float(c, "_g1", 0.0f, &has_g1);
+    l.gw           = v4c__dict_float(c, "_gw", 0.0f, &has_gw);
+    l.has_lobes    = has_g0 && has_g1 && has_gw;
+    l.plastic_type = type != NULL && v4c__str_eq(*type, "_plastic");
+    l.has_sp       = v4c__dict_get(c, "_sp") != NULL;
+    l.has_d        = v4c__dict_get(c, "_d") != NULL;
+    l.has_g        = v4c__dict_get(c, "_g") != NULL;
+    v4c__legacy_material(m, &l);
+}
+
 static void v4c__chunk_matl(v4c__ctx* c, v4c__reader* r)
 {
     const v4c__str* v;
@@ -1329,7 +1451,12 @@ static void v4c__chunk_matl(v4c__ctx* c, v4c__reader* r)
     if (!v4c__read_dict(c, r))
         return;
 
-    id &= 0xFF; /* material 256 is material 0 */
+    /* ids are 1..256, 256 being the unused colour index 0; 0.99.1 also writes an
+       id 0, which MagicaVoxel 0.99.7 ignores like any other id out of range */
+    if (id < 1 || id > 256)
+        return;
+
+    id &= 0xFF;
     m               = &c->matl[id];
     c->has_matl[id] = 1;
 
@@ -1347,6 +1474,9 @@ static void v4c__chunk_matl(v4c__ctx* c, v4c__reader* r)
             m->type = V4C_MATERIAL_MEDIA;
         else
             m->type = V4C_MATERIAL_DIFFUSE;
+
+        if (v4c__str_eq(*v, "_plastic")) /* 0.99.3 - 0.99.4: a type of its own */
+            m->plastic = true;
     }
 
     if ((v = v4c__dict_get(c, "_rough")) != NULL)
@@ -1355,7 +1485,7 @@ static void v4c__chunk_matl(v4c__ctx* c, v4c__reader* r)
     if ((v = v4c__dict_get(c, "_metal")) != NULL)
         m->metallic = v4c__parse_float(*v, m->metallic);
 
-    if ((v = v4c__dict_get(c, "_sp")) != NULL || (v = v4c__dict_get(c, "_spec")) != NULL)
+    if ((v = v4c__dict_get(c, "_sp")) != NULL)
         m->specular = v4c__parse_float(*v, m->specular);
 
     /* MagicaVoxel writes both: _ior = n - 1 and _ri = n */
@@ -1394,8 +1524,11 @@ static void v4c__chunk_matl(v4c__ctx* c, v4c__reader* r)
             m->media_type = (v4c_media_type)media;
     }
 
+    /* MagicaVoxel leaves _d out when it is 0 (new palettes write 0.05 explicitly) */
     if ((v = v4c__dict_get(c, "_d")) != NULL)
         m->density = v4c__parse_float(*v, m->density);
+    else
+        m->density = 0.0f;
 
     if ((v = v4c__dict_get(c, "_g")) != NULL)
         m->phase = v4c__parse_float(*v, m->phase);
@@ -1408,17 +1541,20 @@ static void v4c__chunk_matl(v4c__ctx* c, v4c__reader* r)
 
     if ((v = v4c__dict_get(c, "_plastic")) != NULL)
         m->plastic = v4c__parse_bool(*v);
+
+    v4c__matl_legacy_keys(c, m);
 }
 
 /* Legacy material chunk (MagicaVoxel <= 0.98), best effort. MATL wins. */
 static void v4c__chunk_matt(v4c__ctx* c, v4c__reader* r)
 {
-    v4c_material*  m;
-    int32_t        id     = v4c__read_i32(r);
-    const int32_t  type   = v4c__read_i32(r);
-    const float    weight = v4c__read_f32(r);
-    const uint32_t bits   = v4c__read_u32(r);
-    float          values[7];
+    v4c_material*   m;
+    int32_t         id     = v4c__read_i32(r);
+    const int32_t   type   = v4c__read_i32(r);
+    const float     weight = v4c__read_f32(r);
+    const uint32_t  bits   = v4c__read_u32(r);
+    float           values[7];
+    v4c__legacy_mat l;
 
     int i;
     for (i = 0; i < 7; ++i)
@@ -1432,10 +1568,7 @@ static void v4c__chunk_matt(v4c__ctx* c, v4c__reader* r)
     c->has_matt[id] = 1;
     switch (type)
     {
-    case 1:
-        m->type     = V4C_MATERIAL_METAL;
-        m->metallic = weight;
-        break;
+    case 1: m->type = V4C_MATERIAL_METAL; break;
     case 2: m->type = V4C_MATERIAL_GLASS; break;
     case 3: m->type = V4C_MATERIAL_EMIT; break;
     default: m->type = V4C_MATERIAL_DIFFUSE; break;
@@ -1448,9 +1581,6 @@ static void v4c__chunk_matt(v4c__ctx* c, v4c__reader* r)
     if (bits & (1u << 1))
         m->roughness = values[1];
 
-    if (bits & (1u << 2))
-        m->specular = values[2];
-
     /* undocumented range: accept both n - 1 (like _ior) and n */
     if (bits & (1u << 3))
         m->ior = values[3] < 1.0f ? values[3] + 1.0f : values[3];
@@ -1461,8 +1591,15 @@ static void v4c__chunk_matt(v4c__ctx* c, v4c__reader* r)
     if (bits & (1u << 5))
         m->emission_power = values[5];
 
-    if (bits & (1u << 6))
-        m->emissive = values[6];
+    /* bit 6 (glow) has no current equivalent; bit 7 (isTotalPower) carries no value */
+    memset(&l, 0, sizeof(l));
+    l.weight     = weight;
+    l.has_weight = 1;
+    l.spec       = values[2];
+    l.has_spec   = (bits & (1u << 2)) != 0;
+    l.att        = values[4];
+    l.has_att    = (bits & (1u << 4)) != 0;
+    v4c__legacy_material(m, &l);
 }
 
 static void v4c__chunk_ntrn(v4c__ctx* c, v4c__reader* r)
@@ -1709,6 +1846,15 @@ static void v4c__chunk_robj(v4c__ctx* c, v4c__reader* r)
         c->render.background.a                                                   = 255;
         if ((v = v4c__dict_get(c, "_color")) != NULL)
             c->render.background = v4c__parse_rgb(*v, c->render.background);
+
+        /* 0.99.1: the switch is part of the group */
+        if ((v = v4c__dict_get(c, "_enable")) != NULL)
+            c->render.show_background = v4c__parse_bool(*v);
+    }
+    else if (v4c__str_eq(*type, "_setting"))
+    {
+        if ((v = v4c__dict_get(c, "_bg_c")) != NULL)
+            c->render.show_background = v4c__parse_bool(*v);
     }
     else if (v4c__str_eq(*type, "_lens") || v4c__str_eq(*type, "_len")) /* _len: older versions */
     {
@@ -2301,6 +2447,16 @@ static void v4c__synthesize_graph(v4c__ctx* c)
         n                              = &c->out_nodes[ni];
         if (!v4c__set_identity_key(c, n))
             return;
+
+        /* MagicaVoxel 0.99+ converts these files by standing the model on the
+           ground: translation (0, 0, floor(size.z / 2)), so the lowest voxel
+           layer is at z = 0 (a PACK animation uses the first frame's size). */
+        {
+            static const int8_t identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+            const int32_t       z           = c->models[anim ? 0u : i].size[2];
+            const int32_t       t[3]        = { 0, 0, z > 0 ? z / 2 : 0 };
+            v4c__convert_transform(c, identity, t, &n->transform_keys[0].transform);
+        }
 
         n->model_keys = (v4c_model_key*)v4c__calloc(nk, sizeof(v4c_model_key));
         if (!n->model_keys)
