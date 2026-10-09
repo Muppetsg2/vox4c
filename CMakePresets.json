@@ -1,0 +1,223 @@
+﻿{
+  "version": 9,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 30,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "Base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "installDir": "${sourceDir}/install/${presetName}",
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": {
+          "enableMicrosoftCodeAnalysis": true,
+          "enableClangTidyCodeAnalysis": false,
+        }
+      },
+      "cacheVariables": {
+        "CMAKE_C_STANDARD_REQUIRED": true,
+        "CMAKE_CXX_STANDARD_REQUIRED": true,
+        "CMAKE_C_STANDARD": "11",
+        "CMAKE_CXX_STANDARD": "11",
+        "CMAKE_C_EXTENSIONS": false,
+        "CMAKE_CXX_EXTENSIONS": false,
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe",
+        "VOX4C_ENABLE_CLANG_TIDY": true,
+        "VOX4C_BUILD_LIBRARY": true
+      }
+    },
+    {
+      "name": "Release",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "Debug",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "x86_64",
+      "hidden": true,
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      }
+    },
+    {
+      "name": "x86",
+      "hidden": true,
+      "architecture": {
+        "value": "x86",
+        "strategy": "external"
+      }
+    },
+    {
+      "name": "Linux-Base",
+      "hidden": true,
+      "inherits": "Base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "MacOS-Base",
+      "hidden": true,
+      "inherits": "Base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "Windows-Base",
+      "hidden": true,
+      "inherits": "Base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "x64-Debug-Linux",
+      "displayName": "x64 Debug (Linux)",
+      "inherits": [
+        "Linux-Base",
+        "Debug",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "x64-Debug-MacOS",
+      "displayName": "x64 Debug (MacOS)",
+      "inherits": [
+        "MacOS-Base",
+        "Debug",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "x64-Debug-Windows",
+      "displayName": "x64 Debug (Windows)",
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": {
+          "intelliSenseMode": "windows-clang-x64"
+        }
+      },
+      "inherits": [
+        "Windows-Base",
+        "Debug",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "x64-Release-Linux",
+      "displayName": "x64 Release (Linux)",
+      "inherits": [
+        "Linux-Base",
+        "Release",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "x64-Release-MacOS",
+      "displayName": "x64 Release (MacOS)",
+      "inherits": [
+        "MacOS-Base",
+        "Release",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "x64-Release-Windows",
+      "displayName": "x64 Release (Windows)",
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": {
+          "intelliSenseMode": "windows-clang-x64"
+        }
+      },
+      "inherits": [
+        "Windows-Base",
+        "Release",
+        "x86_64"
+      ]
+    },
+    {
+      "name": "x86-Debug-Linux",
+      "displayName": "x86 Debug (Linux)",
+      "inherits": [
+        "Linux-Base",
+        "Debug",
+        "x86"
+      ]
+    },
+    {
+      "name": "x86-Debug-MacOS",
+      "displayName": "x86 Debug (MacOS)",
+      "inherits": [
+        "MacOS-Base",
+        "Debug",
+        "x86"
+      ]
+    },
+    {
+      "name": "x86-Debug-Windows",
+      "displayName": "x86 Debug (Windows)",
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": {
+          "intelliSenseMode": "windows-clang-x86"
+        }
+      },
+      "inherits": [
+        "Windows-Base",
+        "Debug",
+        "x86"
+      ]
+    },
+    {
+      "name": "x86-Release-Linux",
+      "displayName": "x86 Release (Linux)",
+      "inherits": [
+        "Linux-Base",
+        "Release",
+        "x86"
+      ]
+    },
+    {
+      "name": "x86-Release-MacOS",
+      "displayName": "x86 Release (MacOS)",
+      "inherits": [
+        "MacOS-Base",
+        "Release",
+        "x86"
+      ]
+    },
+    {
+      "name": "x86-Release-Windows",
+      "displayName": "x86 Release (Windows)",
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": {
+          "intelliSenseMode": "windows-clang-x86"
+        }
+      },
+      "inherits": [
+        "Windows-Base",
+        "Release",
+        "x86"
+      ]
+    }
+  ]
+}
