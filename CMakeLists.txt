@@ -137,7 +137,7 @@ if(VOX4C_VS_LAUNCH_CONFIG AND VOX4C_IS_TOP_LEVEL AND (VOX4C_BUILD_TESTS OR VOX4C
     endif()
     file(GLOB_RECURSE VOX4C_VS_LAUNCH_FILES LIST_DIRECTORIES false ${_vox4c_glob_depends}
          "${VOX4C_VOX_FILES_DIR}/*.vox")
-    include(${PROJECT_SOURCE_DIR}/cmake/vox4cSortFiles.cmake)
+    include(${PROJECT_SOURCE_DIR}/cmake/Vox4cSortFiles.cmake)
     vox4c_sort_vox_files(VOX4C_VS_LAUNCH_FILES "${VOX4C_VOX_FILES_DIR}" ${VOX4C_VS_LAUNCH_FILES})
 endif()
 
@@ -207,26 +207,26 @@ if(VOX4C_INSTALL)
     endif()
 
     configure_package_config_file(
-        "${PROJECT_SOURCE_DIR}/cmake/vox4cConfig.cmake.in"
-        "${PROJECT_BINARY_DIR}/vox4cConfig.cmake"
+        "${PROJECT_SOURCE_DIR}/cmake/Vox4cConfig.cmake.in"
+        "${PROJECT_BINARY_DIR}/Vox4cConfig.cmake"
         INSTALL_DESTINATION ${VOX4C_CMAKE_INSTALL_DIR})
     if(VOX4C_BUILD_LIBRARY)
         # contains a compiled library: 32 / 64 bit must match
         write_basic_package_version_file(
-            "${PROJECT_BINARY_DIR}/vox4cConfigVersion.cmake"
+            "${PROJECT_BINARY_DIR}/Vox4cConfigVersion.cmake"
             VERSION ${PROJECT_VERSION}
             COMPATIBILITY SameMajorVersion)
     else()
         write_basic_package_version_file(
-            "${PROJECT_BINARY_DIR}/vox4cConfigVersion.cmake"
+            "${PROJECT_BINARY_DIR}/Vox4cConfigVersion.cmake"
             VERSION ${PROJECT_VERSION}
             COMPATIBILITY SameMajorVersion
             ARCH_INDEPENDENT)
     endif()
 
     install(FILES
-        "${PROJECT_BINARY_DIR}/vox4cConfig.cmake"
-        "${PROJECT_BINARY_DIR}/vox4cConfigVersion.cmake"
+        "${PROJECT_BINARY_DIR}/Vox4cConfig.cmake"
+        "${PROJECT_BINARY_DIR}/Vox4cConfigVersion.cmake"
         DESTINATION ${VOX4C_CMAKE_INSTALL_DIR})
 endif()
 

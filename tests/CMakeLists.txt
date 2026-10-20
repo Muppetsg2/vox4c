@@ -61,7 +61,7 @@ set(_vox4c_misuse_command "${CMAKE_COMMAND}"
     "-DTARGET=vox4c_misuse_check"
     "-DCONFIG=$<CONFIG>"
     "-DEXPECT=already contains the implementation"
-    -P "${PROJECT_SOURCE_DIR}/cmake/vox4cExpectBuildError.cmake")
+    -P "${PROJECT_SOURCE_DIR}/cmake/Vox4cExpectBuildError.cmake")
 add_test(NAME vox4c.misuse_is_reported COMMAND ${_vox4c_misuse_command})
 # cmake --build <dir> --target vox4c_run_misuse_check
 add_custom_target(vox4c_run_misuse_check

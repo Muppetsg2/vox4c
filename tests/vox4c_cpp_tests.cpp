@@ -37,6 +37,17 @@ int main()
     {
         CHECK(scene->num_models == 0);
         CHECK(scene->left_handed);
+        CHECK(scene->anim_first == 0);
+        CHECK(scene->anim_last == 30);
+
+        // animation API: nothing to draw in an empty scene
+        CHECK(v4c_frame_instances(scene, 2.5f, V4C_SAMPLE_SMOOTH, true, NULL, 0) == 0);
+        v4c_mesh baked;
+        CHECK(v4c_bake_frame(scene, 2.5f, V4C_SAMPLE_SMOOTH, true, V4C_FLAG_16BIT_INDICES, &baked) == V4C_SUCCESS);
+        CHECK(baked.num_vertices == 0);
+        CHECK(baked.num_indices == 0);
+        v4c_free_mesh(&baked);
+        CHECK(v4c_build_model_mesh(scene, 0, 0) == V4C_ERROR_INVALID_ARGUMENT);
         v4c_free_scene(scene);
     }
     CHECK(v4c_load_memory(file, 3, &opt, &scene) == V4C_ERROR_INVALID_FORMAT);

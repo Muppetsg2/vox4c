@@ -193,7 +193,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("file version %u, %u frame(s), loaded frame: ", s->file_version, s->num_frames);
+    printf("file version %u, %u frame(s), timeline %u .. %u, loaded frame: ", s->file_version, s->num_frames,
+           s->anim_first, s->anim_last);
     if (s->loaded_frame == V4C_ALL_FRAMES)
         printf("all\n");
     else

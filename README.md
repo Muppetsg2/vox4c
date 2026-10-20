@@ -10,9 +10,11 @@ tinyobjloader / tinygltf. Works from C and C++, has no dependencies beyond the C
 - layers (`LAYR`) with name, colour and hidden flag
 - lighting and background of the MagicaVoxel render (sun as directional or area light, sky light, lens) and the
   camera slots
-- animation: transform and model keyframes, `_loop`, legacy 0.98 `PACK` animations, plus loading of a single frame
+- animation: transform and model keyframes, `_loop`, the editor's timeline (`META _anim_range`), legacy 0.98 `PACK`
+  animations; sampling at fractional frames (MagicaVoxel's rules or smooth interpolation), the list of models drawn
+  at a frame with their matrices, whole frames baked into one mesh, and loading of a single frame
 - optional monotone meshing (0fps / mik14a VoxImporter algorithm), with submeshes per material, as float arrays or
-  as 8 byte packed vertices
+  as 8 byte packed vertices, with 32 or 16-bit indices, while loading or on demand per model
 - optional "used materials only" compaction of the 256 entry palette
 - selectable output coordinate system (MagicaVoxel / Unreal / OpenGL / Unity / custom), scale and pivot
 
@@ -49,8 +51,8 @@ Configuration macros (define before the implementation): `VOX4C_STATIC` (static 
 
 | field | default | meaning |
 |---|---|---|
-| `flags` | `0` | `V4C_FLAG_GENERATE_MESHES`, `V4C_FLAG_PACKED_VERTICES`, `V4C_FLAG_USED_MATERIALS_ONLY`, `V4C_FLAG_DISCARD_VOXELS`, `V4C_FLAG_CLOCKWISE_WINDING` |
-| `frame` | `V4C_ALL_FRAMES` | load the whole animation, or only frame `N` (`V4C_ERROR_FRAME_NOT_FOUND` if `N >= num_frames`) |
+| `flags` | `0` | `V4C_FLAG_GENERATE_MESHES`, `V4C_FLAG_PACKED_VERTICES`, `V4C_FLAG_USED_MATERIALS_ONLY`, `V4C_FLAG_DISCARD_VOXELS`, `V4C_FLAG_CLOCKWISE_WINDING`, `V4C_FLAG_16BIT_INDICES` |
+| `frame` | `V4C_ALL_FRAMES` | load the whole animation, or only frame `N`, up to the last keyframe or the end of the timeline, whichever is later (`V4C_ERROR_FRAME_NOT_FOUND` past it) |
 | `coord_system` | `V4C_COORDS_Z_UP_RIGHT_HANDED` | output coordinates, see below |
 | `custom_axes[3]` | – | for `V4C_COORDS_CUSTOM`: output x / y / z = signed MagicaVoxel axis |
 | `scale` | `1.0` | size of one voxel in output units |
@@ -164,15 +166,71 @@ for (uint32_t i = 0; i < scene->num_nodes; ++i) {
 
 Or, to bake: `v4c_node_model_matrix(scene, node, frame, M)` returns the world matrix of the node's mesh at `frame`,
 and `v4c_node_is_visible()` combines hidden flags of the node, its ancestors and their layers. If the determinant of
-the matrix is negative (a mirrored instance) flip the triangle winding. See `examples/vox2obj.c`.
+the matrix is negative (a mirrored instance) flip the triangle winding. See `examples/vox2obj.c`, or let
+`v4c_frame_instances()` / `v4c_bake_frame()` do it (below).
 
 ### Animation
 
-`scene->num_frames` is the last keyframe + 1. Sampling follows MagicaVoxel: rotations and models snap to the previous
-key, translations are interpolated linearly and truncated to whole voxels, `_loop` repeats the node's key range.
-With `opt.frame = N` each node keeps one key (the sampled state at `N`), models that no node uses at that frame are dropped
-(`v4c_model::file_index` still tells which model of the file it is) and the sampling functions ignore their `frame`
-argument.
+A node animates its transform (`transform_keys`) and, as a flipbook, its model (`model_keys`: one model per pose).
+`scene->num_frames` is the last keyframe + 1; `scene->anim_first .. anim_last` is the timeline of the editor
+(`META _anim_range`); files without it get MagicaVoxel's default `0 .. 30` (extended to the last keyframe if that is
+later), which is also what MagicaVoxel 0.99.7 writes when it re-saves an older file. The timeline can be longer than
+the keys: looping nodes (`_loop`) repeat their key range, the others hold their last key.
+
+Integer frames are sampled like MagicaVoxel does: rotations and models snap to the previous key, translations are
+interpolated linearly and truncated to whole voxels. For playback at the engine's frame rate every function below
+also takes a fractional `frame` and a `v4c_sampling`:
+
+| sampling | transform between keys | model |
+|---|---|---|
+| `V4C_SAMPLE_MAGICAVOXEL` | exactly as MagicaVoxel shows frame `floor(frame)` | model key at `floor(frame)` |
+| `V4C_SAMPLE_SMOOTH` | translation interpolated without truncation, rotation slerped (mirroring snaps); a looping node blends from its last key back to the first | model key at `floor(frame)` |
+
+```c
+/* what to draw at time t (seconds), 24 frames per second, looping over the timeline */
+float span  = (float)(scene->anim_last - scene->anim_first + 1);
+float frame = (float)scene->anim_first + fmodf(t * 24.0f, span);
+
+v4c_instance inst[256];
+uint32_t n = v4c_frame_instances(scene, frame, V4C_SAMPLE_SMOOTH, true /* visible only */, inst, 256);
+for (uint32_t i = 0; i < n && i < 256; ++i) {
+    /* inst[i].matrix: column-major world matrix of the model's mesh (scene_offset included),
+       inst[i].mirrored: negative determinant, draw with the opposite face culling */
+    draw(gpu_mesh[inst[i].model], inst[i].matrix, inst[i].mirrored);
+}
+```
+
+`v4c_frame_instances()` returns the number of instances (call it with `NULL, 0` to only count them).
+`v4c_sample_node_transform_at()` gives one node's local transform at a fractional frame, for engines that keep the
+node hierarchy (see *Rebuilding a scene*).
+
+`v4c_bake_frame(scene, frame, sampling, visible_only, flags, &mesh)` merges every model drawn at `frame` into one
+world-space mesh (float arrays, one submesh per material, winding fixed for mirrored instances; `flags`:
+`V4C_FLAG_CLOCKWISE_WINDING`, `V4C_FLAG_16BIT_INDICES`). Models without a mesh are meshed temporarily from their
+voxels. Free it with `v4c_free_mesh()`. Good for exporters (`examples/vox4c_anim.c --obj`), collision shapes or
+pre-baked vertex animation.
+
+With `opt.frame = N` only frame `N` is loaded: each node keeps one key (the sampled state at `N`), models that no
+node uses at that frame are dropped (`v4c_model::file_index` still tells which model of the file it is) and the
+sampling functions ignore their `frame` argument.
+
+#### Animations and memory
+
+A flipbook animation is one model per pose, so meshing everything up front multiplies the mesh memory by the
+number of poses although a frame draws only a few of them. Load without `V4C_FLAG_GENERATE_MESHES` (voxels only,
+4 bytes per voxel) and build the meshes as frames need them:
+
+```c
+v4c_build_model_mesh(scene, model, V4C_FLAG_PACKED_VERTICES | V4C_FLAG_16BIT_INDICES);  /* -> model's mesh */
+/* upload scene->models[model].mesh to the GPU ... */
+v4c_free_model_mesh(scene, model);                                                       /* CPU copy no longer needed */
+```
+
+`v4c_build_model_mesh()` produces exactly the mesh `V4C_FLAG_GENERATE_MESHES` would (same coordinate system, scale,
+pivot and palette mode). Upload all poses once and free the CPU copies, or keep only the meshes of the poses around
+the current frame. For the animations in `vox_files/anim`, all poses meshed up front take 85 – 145 KB (packed
+vertices, 32-bit indices), the poses of one frame 7 – 29 KB (packed vertices, 16-bit indices);
+`examples/vox4c_anim.c` prints both for any file.
 
 ## Lighting, background and cameras
 
@@ -284,6 +342,13 @@ are sorted by material and described by `submeshes`.
 Positions are `(grid position − pivot) * scale`. Faces between two voxels of different colours are culled like between
 equal ones (the outer shell only).
 
+Meshes can also be built after loading, one model at a time, with `v4c_build_model_mesh()` (needs the voxels, so not
+with `V4C_FLAG_DISCARD_VOXELS`) and freed with `v4c_free_model_mesh()`, see *Animations and memory*.
+
+With `V4C_FLAG_16BIT_INDICES` a mesh with at most 65536 vertices stores its indices in `indices16` (`indices` is
+`NULL`), halving the index memory; larger meshes keep 32-bit `indices`. `v4c_mesh_index(mesh, i)` reads either.
+`mesh.clockwise` tells the winding of the triangles.
+
 ### Packed vertices
 
 By default a mesh stores plain float arrays (33 bytes per vertex), which can be handed to any engine or to
@@ -328,7 +393,10 @@ glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE,            8, (void*)7); /* mater
 glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2);
 
 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-glBufferData(GL_ELEMENT_ARRAY_BUFFER, m->num_indices * sizeof(uint32_t), m->indices, GL_STATIC_DRAW);
+if (m->indices16)   /* V4C_FLAG_16BIT_INDICES */
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, m->num_indices * sizeof(uint16_t), m->indices16, GL_STATIC_DRAW);
+else
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, m->num_indices * sizeof(uint32_t), m->indices, GL_STATIC_DRAW);
 
 /* uniforms of examples/shaders/vox4c_packed.vert */
 glUniform3fv(loc_pivot, 1, model->pivot);
@@ -337,7 +405,7 @@ glUniform1f (loc_num_materials, (float)scene->num_materials);
 v4c_node_model_matrix(scene, node, frame, model_matrix);
 glUniformMatrix4fv(loc_model, 1, GL_FALSE, model_matrix);   /* column-major, no transpose */
 
-glDrawElements(GL_TRIANGLES, m->num_indices, GL_UNSIGNED_INT, 0);
+glDrawElements(GL_TRIANGLES, m->num_indices, m->indices16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, 0);
 ```
 
 The attributes 1 and 2 must use `glVertexAttribIPointer` (with an `I`): the plain function would convert them to
@@ -588,6 +656,7 @@ when they run, so new files are picked up without re-running CMake:
 | `vox4c_memory_readme` | the same table, written into `README.md` in place of the previous one |
 | `vox4c_memory_report_compact` | the same with `V4C_FLAG_USED_MATERIALS_ONLY` (`<build>/vox4c_memory_compact.md`) |
 | `vox4c_export_obj` | converts every file to OBJ + MTL into `<build>/obj/`, keeping the sub-folders |
+| `vox4c_run_anim` | `vox4c_anim --smooth --step 0.5` on every file: timeline, instances per frame, mesh memory up front vs on demand |
 | `vox4c_validate_shaders` | compiles and links the example GLSL shaders (only if `glslangValidator` is found) |
 
 ```sh
@@ -614,13 +683,17 @@ itself (the definition `vox4c::lib` gives its users), so the check is always ava
 cc -std=c99 -O2 examples/vox4c_info.c -o vox4c_info   # prints layers, models, materials and the node tree
 cc -std=c99 -O2 examples/vox2obj.c    -o vox2obj      # bakes a frame into OBJ + MTL
 cc -std=c99 -O2 examples/vox4c_memory.c -o vox4c_memory # mesh memory: float vs packed vertices (Markdown table)
+cc -std=c99 -O2 examples/vox4c_anim.c   -o vox4c_anim   # plays the animation: instances, meshes on demand, --obj baking
 cc -std=c99 -O2 tests/vox4c_tests.c    -o vox4c_tests -lm
 ./vox4c_tests file1.vox file2.vox ...
 ```
 
 The tests check, for every coordinate preset, winding, pivot and scale: mesh area equals exposed voxel faces, signed
 volume equals voxel count, normals agree with winding, compacted and full materials give identical results, and that
-single-frame loading equals sampling the full animation. They also fuzz the loader with truncated and corrupted data
+single-frame loading equals sampling the full animation. Meshes built on demand must equal the ones built while
+loading (float, packed, 16-bit, clockwise), instances must equal the per-node matrices, baked frames must enclose
+exactly the drawn voxels, and smooth sampling must pass through every key; a synthetic file checks loops, the
+timeline and interpolation between keys. They also fuzz the loader with truncated and corrupted data
 and check every material key / type combination MagicaVoxel writes, and that packed vertices decode bit-exactly
 to the float arrays (in every coordinate system, winding, pivot, scale and material mode).
 Scene transforms were cross-checked frame by frame against `ogt_vox.h`.

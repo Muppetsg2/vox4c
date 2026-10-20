@@ -1,7 +1,7 @@
 # Helpers for targets / tests that run a vox4c executable on every .vox file
 # of VOX4C_VOX_FILES_DIR (searched recursively when the target runs).
 
-set(VOX4C_RUN_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/vox4cRunOnVoxFiles.cmake")
+set(VOX4C_RUN_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/Vox4cRunOnVoxFiles.cmake")
 set(VOX4C_FILE_TIMEOUT 600 CACHE STRING "Timeout in seconds for one .vox file in the vox4c_* run targets")
 
 # Builds the "cmake -P" command line into <out_var>.

@@ -261,7 +261,9 @@ The frames are keyframes, sorted by `_f`. The value at frame *f*:
 3. Between two keys the **rotation** is the one of the earlier key (no interpolation) and the **translation** is
    interpolated linearly and **truncated toward zero** to whole voxels.
 
-The animation of the whole file has `max(_f) + 1` frames; `META` may store the range shown in the editor.
+The animation of the whole file has `max(_f) + 1` frames; `META` may store the range shown in the editor (17).
+The editor's timeline can be longer than the keys: a node with `_loop` keeps repeating its key range, a node
+without it holds its last key (rule 2). `nSHP` model keys (10) follow the same rules, without interpolation.
 
 ---
 
@@ -523,6 +525,11 @@ without it; it only tells in which order the editor shows them. **[ogt]**
 |---|---|
 | `_anim_range` | `"first last"`, the animation range of the editor's timeline (e.g. `"0 30"`) |
 
+Seen only in files of 0.99.7, though not in all of them. Every older file re-saved by 0.99.7 got `"0 30"`, whatever
+its number of frames, so a reader should assume the editor's default `0 30` when the chunk is missing (vox4c extends
+it to `max(_f)` if that is later). vox4c returns the range as `anim_first` / `anim_last` and also accepts
+single-frame loads up to `last` when it lies past the last key.
+
 ---
 
 ## 18. Notes for readers
@@ -749,7 +756,7 @@ default slots when it re-saves them.
 ## L.8 What vox4c does with older files
 
 vox4c returns older files the way MagicaVoxel 0.99.7 shows them after opening them: for the 0.99.1 and 0.99.4.2
-files and the three animations above, the scene, the frames, the palette, all 256 materials and the background
+files and the three animations above, the scene, the frames, the timeline, the palette, all 256 materials and the background
 switch are identical to those of their 0.99.7 re-saves. Where 0.99.7 throws information away entirely (`MATT`,
 `_len`), vox4c keeps it:
 
@@ -764,6 +771,7 @@ switch are identical to those of their 0.99.7 re-saves. Where 0.99.7 throws info
 | `_bg _enable` | `show_background`, like `_setting _bg_c` |
 | `_rayleigh`, `_mie`, `_fog`, `_aces`, film keys | not read (like their current counterparts) |
 | `LAYR` without `_color` | white |
+| no `META` | timeline `0 .. 30` (`anim_first` / `anim_last`), the range 0.99.7 writes when re-saving |
 
 ---
 

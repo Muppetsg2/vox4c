@@ -274,6 +274,205 @@ static void compare_packed(const unsigned char* data, size_t size, const v4c_loa
     v4c_free_scene(packed);
 }
 
+/* ---- meshes on demand, 16-bit indices, instances and baked frames ---- */
+
+static int meshes_equal(const v4c_mesh* a, const v4c_mesh* b)
+{
+    uint32_t i;
+    if (a->num_vertices != b->num_vertices || a->num_indices != b->num_indices ||
+        a->num_submeshes != b->num_submeshes || a->clockwise != b->clockwise)
+        return 0;
+
+    for (i = 0; i < a->num_indices; ++i)
+        if (v4c_mesh_index(a, i) != v4c_mesh_index(b, i))
+            return 0;
+
+    if ((a->packed == NULL) != (b->packed == NULL) || (a->indices16 == NULL) != (b->indices16 == NULL))
+        return 0;
+
+    if (a->num_submeshes && memcmp(a->submeshes, b->submeshes, (size_t)a->num_submeshes * sizeof(v4c_submesh)) != 0)
+        return 0;
+
+    if (a->num_vertices == 0)
+        return 1;
+
+    if (a->packed)
+        return memcmp(a->packed, b->packed, (size_t)a->num_vertices * sizeof(v4c_packed_vertex)) == 0;
+
+    return memcmp(a->positions, b->positions, (size_t)a->num_vertices * 3u * sizeof(float)) == 0 &&
+           memcmp(a->normals, b->normals, (size_t)a->num_vertices * 3u * sizeof(float)) == 0 &&
+           memcmp(a->texcoords, b->texcoords, (size_t)a->num_vertices * 2u * sizeof(float)) == 0 &&
+           memcmp(a->materials, b->materials, a->num_vertices) == 0;
+}
+
+/* signed volume of a float mesh (positive for counter-clockwise, outward triangles) */
+static double mesh_volume(const v4c_mesh* m)
+{
+    double   vol = 0.0;
+    uint32_t t;
+    for (t = 0; t + 2u < m->num_indices; t += 3u)
+    {
+        const float* a = &m->positions[(size_t)v4c_mesh_index(m, t) * 3u];
+        const float* b = &m->positions[(size_t)v4c_mesh_index(m, t + 1u) * 3u];
+        const float* c = &m->positions[(size_t)v4c_mesh_index(m, t + 2u) * 3u];
+        vol += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) -
+                (double)a[1] * ((double)b[0] * c[2] - (double)b[2] * c[0]) +
+                (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) /
+               6.0;
+    }
+    return vol;
+}
+
+/* meshes on demand == meshes generated while loading, in every format */
+static void check_meshes_on_demand(v4c_scene* lazy, const unsigned char* data, size_t size, const v4c_load_options* opt)
+{
+    static const uint32_t variants[3] = { 0u, V4C_FLAG_16BIT_INDICES | V4C_FLAG_CLOCKWISE_WINDING,
+                                          V4C_FLAG_PACKED_VERTICES | V4C_FLAG_16BIT_INDICES };
+    uint32_t              v, i;
+    for (v = 0; v < 3u; ++v)
+    {
+        v4c_load_options o2    = *opt;
+        v4c_scene*       eager = NULL;
+        o2.flags               = V4C_FLAG_GENERATE_MESHES | variants[v];
+        if (v4c_load_memory(data, size, &o2, &eager) != V4C_SUCCESS)
+        {
+            CHECK(0, "load with meshes");
+            continue;
+        }
+
+        for (i = 0; i < lazy->num_models; ++i)
+        {
+            const v4c_mesh* m = &lazy->models[i].mesh;
+            CHECK(v4c_build_model_mesh(lazy, i, variants[v]) == V4C_SUCCESS, "v4c_build_model_mesh");
+            CHECK(meshes_equal(m, &eager->models[i].mesh),
+                  "mesh on demand differs from the loaded one (model %u, flags %x)", i, variants[v]);
+            if (variants[v] & V4C_FLAG_16BIT_INDICES)
+                CHECK(m->num_vertices > 65536u || m->num_indices == 0 || (m->indices16 && !m->indices),
+                      "16-bit indices expected");
+            v4c_free_model_mesh(lazy, i);
+            CHECK(m->num_vertices == 0 && !m->positions && !m->packed && !m->indices16, "freed mesh");
+        }
+        v4c_free_scene(eager);
+    }
+}
+
+/* instances == the per-node functions at frame f (sampled at f + 0.75); returns the voxels drawn */
+static double check_instances(const v4c_scene* s, uint32_t f)
+{
+    v4c_instance   inst[64];
+    const uint32_t n_inst = v4c_frame_instances(s, (float)f + 0.75f, V4C_SAMPLE_MAGICAVOXEL, true, inst, 64);
+    uint32_t       n, k = 0;
+    double         voxels = 0.0;
+    for (n = 0; n < s->num_nodes; ++n)
+    {
+        const int32_t m = v4c_sample_node_model(s, n, f);
+        float         M[16];
+        if (m < 0 || !v4c_node_is_visible(s, n))
+            continue;
+
+        v4c_node_model_matrix(s, n, f, M);
+        if (k < n_inst && k < 64u)
+        {
+            const float det = M[0] * (M[5] * M[10] - M[9] * M[6]) - M[4] * (M[1] * M[10] - M[9] * M[2]) +
+                              M[8] * (M[1] * M[6] - M[5] * M[2]);
+            CHECK(inst[k].node == n && inst[k].model == (uint32_t)m, "instance %u: node / model", k);
+            CHECK(floats_equal(inst[k].matrix, M, 16), "instance matrix != v4c_node_model_matrix");
+            CHECK(inst[k].mirrored == (det < 0.0f), "instance mirroring");
+        }
+        voxels += s->models[m].num_voxels;
+        ++k;
+    }
+    CHECK(n_inst == k, "instance count %u != %u", n_inst, k);
+    CHECK(v4c_frame_instances(s, (float)f, V4C_SAMPLE_MAGICAVOXEL, true, NULL, 0) == k, "count only");
+    return voxels;
+}
+
+/* temporary meshes (lazy) and packed meshes (eager) bake to the same frame, enclosing the voxels */
+static void check_baked_frame(const v4c_scene* lazy, const v4c_scene* eager, uint32_t f, double voxels)
+{
+    const double expect = voxels * 0.125; /* scale 0.5 */
+    v4c_mesh     a, b, cw;
+    uint32_t     i;
+    CHECK(v4c_bake_frame(lazy, (float)f, V4C_SAMPLE_MAGICAVOXEL, true, 0, &a) == V4C_SUCCESS, "bake");
+    CHECK(v4c_bake_frame(eager, (float)f, V4C_SAMPLE_MAGICAVOXEL, true, V4C_FLAG_16BIT_INDICES, &b) == V4C_SUCCESS,
+          "bake packed");
+    CHECK(a.num_vertices == b.num_vertices && a.num_indices == b.num_indices, "baked sizes differ");
+    for (i = 0; i < a.num_indices && i < b.num_indices; ++i)
+        if (v4c_mesh_index(&a, i) != v4c_mesh_index(&b, i))
+        {
+            CHECK(0, "baked indices differ");
+            break;
+        }
+
+    for (i = 0; i < a.num_vertices * 3u && i < b.num_vertices * 3u; ++i)
+        if (fabsf(a.positions[i] - b.positions[i]) > 1e-4f || fabsf(a.normals[i] - b.normals[i]) > 1e-6f)
+        {
+            CHECK(0, "baked vertices differ");
+            break;
+        }
+
+    /* outward, counter-clockwise triangles enclose exactly the voxels */
+    CHECK(fabs(mesh_volume(&a) - expect) <= 1e-3 * (expect > 1.0 ? expect : 1.0), "baked volume %g != %g",
+          mesh_volume(&a), expect);
+
+    /* clockwise baking flips every triangle */
+    CHECK(v4c_bake_frame(lazy, (float)f, V4C_SAMPLE_MAGICAVOXEL, true, V4C_FLAG_CLOCKWISE_WINDING, &cw) == V4C_SUCCESS,
+          "bake clockwise");
+    CHECK(cw.clockwise && fabs(mesh_volume(&cw) + mesh_volume(&a)) <= 1e-3 * (1.0 + fabs(mesh_volume(&a))),
+          "clockwise bake");
+    v4c_free_mesh(&cw);
+    v4c_free_mesh(&a);
+    v4c_free_mesh(&b);
+}
+
+/* smooth sampling passes through every key */
+static void check_smooth_keys(const v4c_scene* s)
+{
+    uint32_t i, k;
+    int      a;
+    for (i = 0; i < s->num_nodes; ++i)
+    {
+        const v4c_node* nd = &s->nodes[i];
+        for (k = 0; k < nd->num_transform_keys; ++k)
+        {
+            const v4c_transform* key = &nd->transform_keys[k].transform;
+            const v4c_transform  t =
+                v4c_sample_node_transform_at(s, i, (float)nd->transform_keys[k].frame, V4C_SAMPLE_SMOOTH);
+            for (a = 0; a < 9; ++a)
+                CHECK(fabsf(t.rotation[a] - key->rotation[a]) < 1e-5f, "smooth rotation at a key");
+            for (a = 0; a < 3; ++a)
+                CHECK(fabsf(t.translation[a] - key->translation[a]) < 1e-4f, "smooth translation at a key");
+        }
+    }
+}
+
+static void test_file_animation(const unsigned char* data, size_t size)
+{
+    v4c_load_options opt;
+    v4c_scene*       lazy  = NULL;
+    v4c_scene*       eager = NULL;
+    uint32_t         f;
+    v4c_default_load_options(&opt);
+    opt.coord_system = V4C_COORDS_Y_UP_RIGHT_HANDED;
+    opt.scale        = 0.5f;
+    opt.pivot        = V4C_PIVOT_CENTER; /* non-zero scene_offset */
+    if (v4c_load_memory(data, size, &opt, &lazy) != V4C_SUCCESS)
+    {
+        CHECK(0, "load without meshes");
+        return;
+    }
+
+    check_meshes_on_demand(lazy, data, size, &opt);
+    opt.flags = V4C_FLAG_PACKED_VERTICES;
+    CHECK(v4c_load_memory(data, size, &opt, &eager) == V4C_SUCCESS, "load packed");
+    for (f = 0; eager && f <= lazy->anim_last && f < 6u; ++f)
+        check_baked_frame(lazy, eager, f, check_instances(lazy, f));
+
+    check_smooth_keys(lazy);
+    v4c_free_scene(eager);
+    v4c_free_scene(lazy);
+}
+
 /* NOLINTNEXTLINE(readability-function-size): a test case, long by nature */
 static void test_file(const char* path)
 {
@@ -386,23 +585,32 @@ static void test_file(const char* path)
     /* ---- single frame == sampled animation ---- */
     {
         v4c_load_options opt;
-        v4c_scene*       all = NULL;
-        uint32_t         f;
+        v4c_scene*       all  = NULL;
+        uint32_t         f    = 0;
+        uint32_t         last = 0;
         v4c_default_load_options(&opt);
         opt.coord_system = V4C_COORDS_Y_UP_LEFT_HANDED;
         opt.scale        = 0.5f;
         v4c_load_memory(data, size, &opt, &all);
         CHECK(all != NULL, "load");
-        for (f = 0; all && f < all->num_frames + 1; ++f)
+        if (all)
+        {
+            last = all->num_frames - 1u > all->anim_last ? all->num_frames - 1u : all->anim_last;
+            CHECK(all->anim_first <= all->anim_last, "animation range");
+        }
+
+        /* every keyframe (up to 16), the last valid frame and one past it */
+        for (f = 0; all && f <= last + 1u; f = (f < 16u && f < last) ? f + 1u : (f < last ? last : f + 1u))
         {
             v4c_scene* one = NULL;
             v4c_result r;
             uint32_t   n;
             opt.frame = (int32_t)f;
             r         = v4c_load_memory(data, size, &opt, &one);
-            if (f == all->num_frames)
+            if (f == last + 1u)
             {
                 CHECK(r == V4C_ERROR_FRAME_NOT_FOUND, "frame past the end must fail");
+                v4c_free_scene(one);
                 continue;
             }
 
@@ -431,6 +639,8 @@ static void test_file(const char* path)
         }
         v4c_free_scene(all);
     }
+
+    test_file_animation(data, size);
 
     /* ---- quaternion/scale reproduce the rotation matrix ---- */
     {
@@ -1342,7 +1552,7 @@ static void test_lenses(void)
                         {
                             const float px = 8.0f + (float)(j * 37 % 40) * 45.0f,
                                         py = 5.0f + (float)(j * 13 % 40) * 18.0f;
-                            float       o[3], d[3], p[3], back[2];
+                            float       o[3], d[3], p[3], back[2] = { 0.0f, 0.0f };
                             int         k;
                             CHECK(
                                 v4c_camera_ray(s, &s->cameras[c], s->render.projection, 70.0f, 1800, 720, px, py, o, d),
@@ -1465,6 +1675,8 @@ static void test_legacy_files(void)
             CHECK(s->file_version == 150 && s->num_models == (uint32_t)frames, "legacy models");
             /* root + one model node, like MagicaVoxel's own conversion */
             CHECK(s->num_nodes == 2 && s->nodes[0].num_children == 1, "legacy graph: %u nodes", s->num_nodes);
+            /* no META: the editor's default timeline, as 0.99.7 writes it when re-saving */
+            CHECK(s->anim_first == 0 && s->anim_last == 30, "legacy timeline %u .. %u", s->anim_first, s->anim_last);
             if (s->num_nodes == 2)
             {
                 const v4c_node*      n = &s->nodes[1];
@@ -1648,6 +1860,190 @@ static void test_legacy_materials(void)
     }
 }
 
+/* ---- synthetic animation: loops, META _anim_range, smooth sampling, instances, baking ---- */
+
+static void put_frame_dict(buf_t* b, const char* const* kv, int n)
+{
+    int i;
+    put_i32(b, n);
+    for (i = 0; i < n; ++i)
+    {
+        const char* eq = strchr(kv[i], '=');
+        put_str(b, kv[i], (size_t)(eq - kv[i]));
+        put_str(b, eq + 1, strlen(eq + 1));
+    }
+}
+
+/* nTRN 0 -> nGRP 1 -> nTRN 2 (looping keys: f0 identity, f10 t = 10 0 0 + 90 deg about z)
+   -> nSHP 3 (looping model keys: f0 model 0, f5 model 1); META _anim_range "0 30" */
+static unsigned char* make_anim_file(size_t* size)
+{
+    static const char* const loop[1] = { "_loop=1" };
+    static const char* const key0[1] = { "_f=0" };
+    static const char* const key1[3] = { "_f=10", "_t=10 0 0", "_r=17" };
+    static const char* const shp0[1] = { "_f=0" };
+    static const char* const shp1[1] = { "_f=5" };
+    buf_t                    file = { NULL, 0, 0 }, main_c = { NULL, 0, 0 }, c = { NULL, 0, 0 };
+    unsigned char            v0[4] = { 0, 0, 0, 1 }, v1[4] = { 1, 0, 0, 2 };
+
+    /* model 0: 2x1x1, model 1: 1x1x1 */
+    put_i32(&c, 2), put_i32(&c, 1), put_i32(&c, 1), put_chunk(&main_c, "SIZE", &c), c.n = 0;
+    put_i32(&c, 2), put(&c, v0, 4), put(&c, v1, 4), put_chunk(&main_c, "XYZI", &c), c.n = 0;
+    put_i32(&c, 1), put_i32(&c, 1), put_i32(&c, 1), put_chunk(&main_c, "SIZE", &c), c.n = 0;
+    put_i32(&c, 1), put(&c, v0, 4), put_chunk(&main_c, "XYZI", &c), c.n = 0;
+
+    put_i32(&c, 0), put_i32(&c, 0), put_i32(&c, 1), put_i32(&c, -1), put_i32(&c, -1), put_i32(&c, 1);
+    put_i32(&c, 0), put_chunk(&main_c, "nTRN", &c), c.n = 0;
+    put_i32(&c, 1), put_i32(&c, 0), put_i32(&c, 1), put_i32(&c, 2), put_chunk(&main_c, "nGRP", &c), c.n = 0;
+    put_i32(&c, 2), put_frame_dict(&c, loop, 1), put_i32(&c, 3), put_i32(&c, -1), put_i32(&c, 0), put_i32(&c, 2);
+    put_frame_dict(&c, key0, 1), put_frame_dict(&c, key1, 3), put_chunk(&main_c, "nTRN", &c), c.n = 0;
+    put_i32(&c, 3), put_frame_dict(&c, loop, 1), put_i32(&c, 2), put_i32(&c, 0), put_frame_dict(&c, shp0, 1);
+    put_i32(&c, 1), put_frame_dict(&c, shp1, 1), put_chunk(&main_c, "nSHP", &c), c.n = 0;
+    put_dict_chunk(&main_c, "META", 0, 0, "_anim_range=0 30");
+
+    put(&file, "VOX ", 4);
+    put_i32(&file, 200);
+    put(&file, "MAIN", 4);
+    put_i32(&file, 0);
+    put_i32(&file, (int32_t)main_c.n);
+    put(&file, main_c.p, main_c.n);
+    free(main_c.p);
+    free(c.p);
+    *size = file.n;
+    return file.p;
+}
+
+static void test_animation(void)
+{
+    size_t           size = 0;
+    unsigned char*   file = make_anim_file(&size);
+    v4c_load_options opt;
+    v4c_scene*       s = NULL;
+    v4c_default_load_options(&opt);
+    printf("synthetic animation\n");
+    CHECK(v4c_load_memory(file, size, &opt, &s) == V4C_SUCCESS && s, "animation file");
+    if (s)
+    {
+        const float   c45 = 0.70710678f;
+        v4c_transform a, b;
+        v4c_instance  inst[2];
+        v4c_mesh      m;
+        uint32_t      f, n, tris;
+        int           k;
+        CHECK(s->num_models == 2 && s->num_nodes == 2 && s->num_frames == 11, "structure (frames %u)", s->num_frames);
+        CHECK(s->anim_first == 0 && s->anim_last == 30, "animation range %u .. %u", s->anim_first, s->anim_last);
+        n = s->num_nodes - 1u; /* the shape node: nTRN 2 + nSHP 3 */
+        CHECK(s->nodes[n].num_model_keys == 2 && s->nodes[n].num_transform_keys == 2, "keys on node %u", n);
+
+        /* MagicaVoxel sampling ignores the fraction */
+        a = v4c_sample_node_transform_at(s, n, 5.7f, V4C_SAMPLE_MAGICAVOXEL);
+        b = v4c_sample_node_transform(s, n, 5);
+        CHECK(floats_equal(a.translation, b.translation, 3) && floats_equal(a.rotation, b.rotation, 9) &&
+                  floats_equal(a.quaternion, b.quaternion, 4) && floats_equal(a.scale, b.scale, 3),
+              "MAGICAVOXEL at 5.7 == frame 5");
+        CHECK(NEAR(b.translation[0], 5.0f), "integer translation %g", (double)b.translation[0]);
+
+        /* smooth: translation and rotation between the keys */
+        a = v4c_sample_node_transform_at(s, n, 2.5f, V4C_SAMPLE_SMOOTH);
+        CHECK(NEAR(a.translation[0], 2.5f) && NEAR(a.translation[1], 0.0f), "smooth translation 2.5");
+        a = v4c_sample_node_transform_at(s, n, 5.0f, V4C_SAMPLE_SMOOTH);
+        CHECK(NEAR(a.translation[0], 5.0f), "smooth translation 5");
+        CHECK(NEAR(a.rotation[0], c45) && NEAR(a.rotation[1], -c45) && NEAR(a.rotation[3], c45) &&
+                  NEAR(a.rotation[4], c45) && NEAR(a.rotation[8], 1.0f),
+              "smooth rotation 45 deg");
+        /* loop closure: from the last key back to the first one */
+        a = v4c_sample_node_transform_at(s, n, 10.5f, V4C_SAMPLE_SMOOTH);
+        CHECK(NEAR(a.translation[0], 5.0f) && NEAR(a.rotation[0], c45) && NEAR(a.rotation[3], c45),
+              "smooth loop closure (t %g)", (double)a.translation[0]);
+        a = v4c_sample_node_transform_at(s, n, 16.0f, V4C_SAMPLE_SMOOTH);
+        b = v4c_sample_node_transform_at(s, n, 5.0f, V4C_SAMPLE_SMOOTH);
+        for (k = 0; k < 3; ++k)
+            CHECK(NEAR(a.translation[k], b.translation[k]), "smooth sampling wraps around");
+        a = v4c_sample_node_transform_at(s, n, -3.0f, V4C_SAMPLE_SMOOTH); /* clamped to 0 */
+        CHECK(NEAR(a.translation[0], 0.0f), "negative frame");
+
+        /* instances: the model of floor(frame) */
+        CHECK(v4c_frame_instances(s, 5.5f, V4C_SAMPLE_MAGICAVOXEL, true, inst, 2) == 1 && inst[0].model == 1 &&
+                  inst[0].node == n && !inst[0].mirrored,
+              "instance at frame 5.5");
+        CHECK(v4c_frame_instances(s, 7.0f, V4C_SAMPLE_SMOOTH, true, inst, 2) == 1 &&
+                  inst[0].model == (uint32_t)v4c_sample_node_model(s, n, 7),
+              "instance at frame 7 (model keys loop)");
+        CHECK(v4c_frame_instances(s, 4.9f, V4C_SAMPLE_SMOOTH, true, inst, 2) == 1 && inst[0].model == 0,
+              "instance at frame 4.9");
+
+        /* baked frames: one box per frame */
+        for (f = 0; f <= 12u; f += 4u)
+        {
+            const int32_t model = v4c_sample_node_model(s, n, f);
+            CHECK(v4c_bake_frame(s, (float)f, V4C_SAMPLE_SMOOTH, true, V4C_FLAG_16BIT_INDICES, &m) == V4C_SUCCESS,
+                  "bake frame %u", f);
+            tris = m.num_indices / 3u;
+            /* model 0: two voxels of two colours (10 faces), model 1: one voxel (6 faces) */
+            CHECK(tris == (model == 0 ? 20u : 12u) && m.indices16 && !m.indices &&
+                      m.num_submeshes == (model == 0 ? 2u : 1u),
+                  "baked frame %u: %u triangles, %u submeshes", f, tris, m.num_submeshes);
+            CHECK(fabs(mesh_volume(&m) - (model == 0 ? 2.0 : 1.0)) < 1e-4, "baked volume at frame %u", f);
+            v4c_free_mesh(&m);
+            CHECK(!m.positions && !m.indices16 && m.num_vertices == 0, "v4c_free_mesh clears the mesh");
+        }
+
+        /* single frame: inside the timeline, after the last key */
+        for (k = 0; k < 2; ++k)
+        {
+            v4c_scene* one = NULL;
+            f              = k ? 30u : 25u; /* the end of the timeline */
+            opt.frame      = (int32_t)f;
+            CHECK(v4c_load_memory(file, size, &opt, &one) == V4C_SUCCESS && one, "single frame %u", f);
+            if (one)
+            {
+                float wa[16], wb[16];
+                v4c_node_world_matrix(s, n, f, wa);
+                v4c_node_world_matrix(one, n, 0, wb);
+                CHECK(floats_equal(wa, wb, 16), "single frame %u == sampled", f);
+                CHECK(one->models[v4c_sample_node_model(one, n, 0)].file_index ==
+                          s->models[v4c_sample_node_model(s, n, f)].file_index,
+                      "single frame model");
+            }
+            v4c_free_scene(one);
+        }
+        {
+            v4c_scene* past = NULL;
+            opt.frame       = 31;
+            CHECK(v4c_load_memory(file, size, &opt, &past) == V4C_ERROR_FRAME_NOT_FOUND && !past,
+                  "frame past the timeline");
+            v4c_free_scene(past);
+        }
+        v4c_free_scene(s);
+        s = NULL;
+
+        /* memory: meshes on demand */
+        opt.frame = V4C_ALL_FRAMES;
+        CHECK(v4c_load_memory(file, size, &opt, &s) == V4C_SUCCESS, "reload");
+        if (s)
+        {
+            CHECK(v4c_build_model_mesh(s, 5, 0) == V4C_ERROR_INVALID_ARGUMENT, "bad model index");
+            CHECK(v4c_build_model_mesh(s, 1, 0) == V4C_SUCCESS && s->models[1].mesh.num_indices == 36, "on demand");
+            CHECK(v4c_mesh_index(&s->models[1].mesh, 0) < 8u, "index");
+            v4c_free_model_mesh(s, 1);
+        }
+    }
+    v4c_free_scene(s);
+
+    /* without voxels there is nothing to mesh on demand */
+    opt.flags = V4C_FLAG_DISCARD_VOXELS;
+    s         = NULL;
+    if (v4c_load_memory(file, size, &opt, &s) == V4C_SUCCESS && s)
+    {
+        v4c_mesh m;
+        CHECK(v4c_build_model_mesh(s, 0, 0) == V4C_ERROR_INVALID_ARGUMENT, "no voxels to mesh");
+        CHECK(v4c_bake_frame(s, 0.0f, V4C_SAMPLE_SMOOTH, true, 0, &m) == V4C_ERROR_INVALID_ARGUMENT,
+              "no meshes and no voxels to bake");
+    }
+    v4c_free_scene(s);
+    free(file);
+}
+
 int main(int argc, char** argv)
 {
     int              i;
@@ -1678,6 +2074,7 @@ int main(int argc, char** argv)
     test_lenses();
     test_legacy_files();
     test_legacy_materials();
+    test_animation();
 
     for (i = 1; i < argc; ++i)
         test_file(argv[i]);

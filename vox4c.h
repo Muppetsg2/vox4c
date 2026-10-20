@@ -1,17 +1,21 @@
 /*
-    vox4c.h - v1.0.0 - single-header MagicaVoxel (.vox) loader for C99 / C++
+    vox4c.h - v1.1.0 - single-header MagicaVoxel (.vox) loader for C99 / C++
 
     Features
       * Models (SIZE/XYZI), palette (RGBA), materials (MATL, legacy MATT)
       * Full scene graph (nTRN/nGRP/nSHP) collapsed into an engine friendly node tree
-	  * Files of every MagicaVoxel version (0.98 and older to 0.99.7): scene graph
+      * Files of every MagicaVoxel version (0.98 and older to 0.99.7): scene graph
         synthesized like MagicaVoxel does, old material keys and MATT converted
       * Layers (LAYR) with name / colour / hidden flag
       * Render settings (rOBJ: background, sun, sky light, lens) and camera slots (rCAM)
       * Animation: transform and model keyframes (_f), looping (_loop),
-        legacy 0.98 PACK animations; optional loading of one single frame
+        legacy 0.98 PACK animations, the editor's animation range (META);
+        optional loading of one single frame; MagicaVoxel or smooth sampling
+        at fractional frames, per-frame instance lists and baked frame meshes
       * Optional monotone meshing (0fps "Meshing in Minecraft, part 2")
-        with float vertex arrays or 8 byte packed vertices (GPU friendly)
+        with float vertex arrays or 8 byte packed vertices (GPU friendly),
+        32 or 16-bit indices, at load time or on demand per model (keep
+        only the meshes of the frames you need)
       * Optional "used materials only" palette compaction
       * Output coordinate system selection (Z-up/Y-up, left/right handed, custom)
       * No dependencies apart from the C standard library, no libm required
@@ -34,6 +38,17 @@
           if (res != V4C_SUCCESS) { printf("%s\n", v4c_result_string(res)); return 1; }
           ...
           v4c_free_scene(scene);
+
+      Animation (load without V4C_FLAG_GENERATE_MESHES to keep only voxels):
+
+          v4c_instance inst[64];
+          uint32_t n = v4c_frame_instances(scene, frame, V4C_SAMPLE_SMOOTH, true, inst, 64);
+          for (i = 0; i < n && i < 64; ++i) {
+              v4c_model* m = &scene->models[inst[i].model];
+              if (m->mesh.num_vertices == 0)
+                  v4c_build_model_mesh(scene, inst[i].model, V4C_FLAG_16BIT_INDICES);
+              draw(&m->mesh, inst[i].matrix, inst[i].mirrored);
+          }
 
     CMake
       vox4c::vox4c  header only, define VOX4C_IMPLEMENTATION in one file
@@ -92,7 +107,7 @@ extern "C" {
 #endif
 
 #define VOX4C_VERSION_MAJOR 1
-#define VOX4C_VERSION_MINOR 0
+#define VOX4C_VERSION_MINOR 1
 #define VOX4C_VERSION_PATCH 0
 
 #define V4C_PALETTE_SIZE   256  /* number of palette entries in a .vox file       */
@@ -136,6 +151,11 @@ typedef enum v4c_result
    About 4x less vertex memory; decode on the GPU (see README) or with
    v4c_unpack_vertex / v4c_mesh_vertex. Implies V4C_FLAG_GENERATE_MESHES. */
 #define V4C_FLAG_PACKED_VERTICES (1u << 4)
+/* Store the indices of meshes with at most 65536 vertices as uint16_t
+   (v4c_mesh::indices16, v4c_mesh::indices stays NULL); larger meshes keep
+   uint32_t indices. Halves the index memory. Read either kind with
+   v4c_mesh_index(). */
+#define V4C_FLAG_16BIT_INDICES (1u << 5)
 
 /* Signed axis, used for custom coordinate systems. */
 typedef enum v4c_axis
@@ -189,8 +209,10 @@ typedef enum v4c_pivot
 
 typedef struct v4c_load_options
 {
-    uint32_t         flags;          /* V4C_FLAG_*                                      */
-    int32_t          frame;          /* V4C_ALL_FRAMES or frame index to load           */
+    uint32_t flags;                  /* V4C_FLAG_*                                      */
+    int32_t  frame;                  /* V4C_ALL_FRAMES or frame index to load, up to    */
+                                     /* the last keyframe or the end of the animation   */
+                                     /* range, whichever is later                       */
     v4c_coord_system coord_system;   /* output coordinate system                        */
     v4c_axis         custom_axes[3]; /* V4C_COORDS_CUSTOM: output x/y/z = signed source */
                                      /* (MagicaVoxel) axis, e.g. {+X, +Z, -Y}           */
@@ -284,7 +306,7 @@ typedef struct v4c_packed_vertex
 typedef struct v4c_submesh
 {
     uint32_t material;    /* index into v4c_scene::materials */
-    uint32_t first_index; /* offset into v4c_mesh::indices   */
+    uint32_t first_index; /* offset into v4c_mesh::indices (or indices16) */
     uint32_t num_indices;
 } v4c_submesh;
 
@@ -300,10 +322,12 @@ typedef struct v4c_mesh
     v4c_packed_vertex* packed;    /* V4C_FLAG_PACKED_VERTICES only, the four arrays above   */
                                   /* are NULL then                                          */
     uint32_t*    indices;         /* 3 per triangle, sorted by material                     */
+    uint16_t*    indices16;       /* V4C_FLAG_16BIT_INDICES: used instead of indices        */
     v4c_submesh* submeshes;       /* one entry per material used by this mesh               */
     uint32_t     num_vertices;
     uint32_t     num_indices;
     uint32_t     num_submeshes;
+    bool         clockwise; /* triangles wound clockwise (V4C_FLAG_CLOCKWISE_WINDING)  */
 } v4c_mesh;
 
 typedef struct v4c_model
@@ -499,7 +523,10 @@ typedef struct v4c_scene
     uint32_t      num_cameras;
 
     uint32_t file_version;
-    uint32_t num_frames;   /* animation length (last keyframe + 1), >= 1          */
+    uint32_t num_frames;   /* last keyframe + 1, >= 1                             */
+    uint32_t anim_first;   /* animation range of the editor's timeline (META      */
+    uint32_t anim_last;    /* _anim_range); without it MagicaVoxel's default      */
+                           /* 0 .. 30 (or up to the last keyframe if later)       */
     int32_t  loaded_frame; /* V4C_ALL_FRAMES or the single loaded frame           */
     float    scale;
     v4c_axis axes[3];     /* mapping used: output axis i = axes[i] of MagicaVoxel */
@@ -527,6 +554,25 @@ VOX4C_API const char* v4c_result_string(v4c_result result);
 VOX4C_API v4c_transform v4c_sample_node_transform(const v4c_scene* scene, uint32_t node, uint32_t frame);
 VOX4C_API int32_t       v4c_sample_node_model(const v4c_scene* scene, uint32_t node, uint32_t frame); /* -1 = none */
 
+/* How to sample an animation at a fractional frame.
+   V4C_SAMPLE_MAGICAVOXEL  as MagicaVoxel plays it: the frame is rounded down
+                           and sampled like v4c_sample_node_transform().
+   V4C_SAMPLE_SMOOTH       for playback in an engine: translations are
+                           interpolated without rounding to whole voxels,
+                           rotations are interpolated (slerp) between keys,
+                           a looping node blends its last key back into the
+                           first. Mirroring (scale) still snaps, and models
+                           (frame-by-frame animation) always snap. */
+typedef enum v4c_sampling
+{
+    V4C_SAMPLE_MAGICAVOXEL = 0,
+    V4C_SAMPLE_SMOOTH
+} v4c_sampling;
+
+/* Local transform of a node at a fractional frame. */
+VOX4C_API v4c_transform v4c_sample_node_transform_at(const v4c_scene* scene, uint32_t node, float frame,
+                                                     v4c_sampling sampling);
+
 /* Matrices (column-major float[16]). */
 VOX4C_API void v4c_transform_to_matrix(const v4c_transform* transform, float out[16]);
 VOX4C_API void v4c_node_local_matrix(const v4c_scene* scene, uint32_t node, uint32_t frame, float out[16]);
@@ -537,6 +583,42 @@ VOX4C_API bool v4c_node_model_matrix(const v4c_scene* scene, uint32_t node, uint
 
 /* false if the node, one of its ancestors or their layers are hidden. */
 VOX4C_API bool v4c_node_is_visible(const v4c_scene* scene, uint32_t node);
+
+/* One model drawn in a frame: everything needed to render it. */
+typedef struct v4c_instance
+{
+    float    matrix[16]; /* mesh space -> world (as v4c_node_model_matrix)     */
+    uint32_t node;
+    uint32_t model;    /* index into scene->models                             */
+    bool     mirrored; /* the matrix mirrors: flip the triangle winding        */
+} v4c_instance;
+
+/* The models drawn at `frame`, in node order (parents first). Writes up to
+   `capacity` instances to `out` (may be NULL) and returns how many there
+   are, so a first call with capacity 0 sizes the array. */
+VOX4C_API uint32_t v4c_frame_instances(const v4c_scene* scene, float frame, v4c_sampling sampling, bool visible_only,
+                                       v4c_instance* out, uint32_t capacity);
+
+/* Meshes on demand. Builds model->mesh from model->voxels (so the scene must
+   be loaded without V4C_FLAG_DISCARD_VOXELS), replacing a mesh it already
+   has; `flags` takes V4C_FLAG_PACKED_VERTICES, V4C_FLAG_CLOCKWISE_WINDING and
+   V4C_FLAG_16BIT_INDICES. The result equals a mesh generated while loading.
+   Load an animation without V4C_FLAG_GENERATE_MESHES and build (and free)
+   the meshes of the frames you need to keep only those in memory. */
+VOX4C_API v4c_result v4c_build_model_mesh(v4c_scene* scene, uint32_t model, uint32_t flags);
+VOX4C_API void       v4c_free_model_mesh(v4c_scene* scene, uint32_t model);
+
+/* Bakes all models drawn at `frame` into one mesh in world space (float
+   arrays, one submesh per material). Models without a mesh are meshed
+   temporarily from their voxels (V4C_ERROR_INVALID_ARGUMENT if they were
+   discarded). `flags` takes V4C_FLAG_CLOCKWISE_WINDING and
+   V4C_FLAG_16BIT_INDICES. Free the result with v4c_free_mesh(). */
+VOX4C_API v4c_result v4c_bake_frame(const v4c_scene* scene, float frame, v4c_sampling sampling, bool visible_only,
+                                    uint32_t flags, v4c_mesh* out);
+VOX4C_API void       v4c_free_mesh(v4c_mesh* mesh);
+
+/* Index `i` of a mesh, whether stored as 32 or 16 bits. */
+VOX4C_API uint32_t v4c_mesh_index(const v4c_mesh* mesh, uint32_t i);
 
 /* Axis aligned bounds (output coordinates) of the models placed in the scene
    at `frame`, optionally only of visible nodes. Returns false if there is no
@@ -1149,6 +1231,8 @@ typedef struct v4c__ctx
     v4c_color    palette[256];
     int          has_palette;
     int          has_pack;
+    int          has_anim_range;
+    uint32_t     anim_range[2]; /* META _anim_range */
     v4c_material matl[256];
     uint8_t      has_matl[256];
     v4c_material matt[256];
@@ -1753,6 +1837,23 @@ static void v4c__chunk_nshp(v4c__ctx* c, v4c__reader* r)
     }
 }
 
+/* META: dictionary; _anim_range = "first last", the editor's timeline */
+static void v4c__chunk_meta(v4c__ctx* c, v4c__reader* r)
+{
+    const v4c__str* v;
+    int32_t         range[2];
+    if (!v4c__read_dict(c, r))
+        return;
+
+    if ((v = v4c__dict_get(c, "_anim_range")) != NULL && v4c__parse_ints(*v, range, 2) == 2 && range[0] >= 0 &&
+        range[1] >= range[0])
+    {
+        c->anim_range[0]  = (uint32_t)range[0];
+        c->anim_range[1]  = (uint32_t)range[1];
+        c->has_anim_range = 1;
+    }
+}
+
 static void v4c__chunk_layr(v4c__ctx* c, v4c__reader* r)
 {
     const v4c__str* v;
@@ -2013,7 +2114,9 @@ static void v4c__parse(v4c__ctx* c, const uint8_t* data, size_t size)
             v4c__chunk_rcam(c, &sub);
         else if (memcmp(id, "PACK", 4) == 0)
             c->has_pack = 1;
-        /* MAIN, NOTE, IMAP, META, ... are skipped */
+        else if (memcmp(id, "META", 4) == 0)
+            v4c__chunk_meta(c, &sub);
+        /* MAIN, NOTE, IMAP, ... are skipped */
 
         if (!sub.ok)
             v4c__fail(c, V4C_ERROR_CORRUPTED_DATA);
@@ -2168,6 +2271,140 @@ static int32_t v4c__sample_model(const v4c_model_key* k, uint32_t n, bool loop, 
             return (int32_t)k[i].model;
 
     return (int32_t)k[0].model;
+}
+
+/* ---- fractional frames (v4c_sampling) ---- */
+
+static double v4c__floor(double x)
+{
+    const double t = (double)(int64_t)x;
+    return t > x ? t - 1.0 : t;
+}
+
+/* Rotation part from quaternion and mirroring: R = rotate(q) * diag(scale). */
+static void v4c__rotation_from_quaternion(v4c_transform* t)
+{
+    const float x = t->quaternion[0], y = t->quaternion[1], z = t->quaternion[2], w = t->quaternion[3];
+    float       q[9];
+    int         r, col;
+    q[0] = 1.0f - 2.0f * (y * y + z * z);
+    q[1] = 2.0f * (x * y - z * w);
+    q[2] = 2.0f * (x * z + y * w);
+    q[3] = 2.0f * (x * y + z * w);
+    q[4] = 1.0f - 2.0f * (x * x + z * z);
+    q[5] = 2.0f * (y * z - x * w);
+    q[6] = 2.0f * (x * z - y * w);
+    q[7] = 2.0f * (y * z + x * w);
+    q[8] = 1.0f - 2.0f * (x * x + y * y);
+    for (r = 0; r < 3; ++r)
+        for (col = 0; col < 3; ++col)
+            t->rotation[r * 3 + col] = q[r * 3 + col] * t->scale[col];
+}
+
+static void v4c__quat_slerp(const float a[4], const float b[4], float t, float out[4])
+{
+    double dot = 0.0, sign = 1.0, w0, w1, len = 0.0;
+    int    i;
+    for (i = 0; i < 4; ++i)
+        dot += (double)a[i] * (double)b[i];
+
+    if (dot < 0.0) /* shortest arc */
+    {
+        dot  = -dot;
+        sign = -1.0;
+    }
+
+    if (dot > 0.9995)
+    {
+        w0 = 1.0 - t;
+        w1 = t;
+    }
+    else
+    {
+        const double theta = v4c__atan2(v4c__sqrt(1.0 - dot * dot), dot);
+        double       s0, s1, st, c;
+        v4c__sincos(theta, &st, &c);
+        v4c__sincos((1.0 - t) * theta, &s0, &c);
+        v4c__sincos(t * theta, &s1, &c);
+        w0 = s0 / st;
+        w1 = s1 / st;
+    }
+
+    for (i = 0; i < 4; ++i)
+    {
+        const double v = w0 * a[i] + sign * w1 * b[i];
+        out[i]         = (float)v;
+        len += v * v;
+    }
+
+    len = v4c__sqrt(len);
+    if (len > 0.0)
+        for (i = 0; i < 4; ++i)
+            out[i] = (float)(out[i] / len);
+}
+
+static v4c_transform v4c__blend_transform(const v4c_transform* a, const v4c_transform* b, float t)
+{
+    v4c_transform out = *a;
+    int           i;
+    if (t <= 0.0f)
+        return *a;
+
+    if (t >= 1.0f)
+        return *b;
+
+    for (i = 0; i < 3; ++i)
+        out.translation[i] = a->translation[i] + (b->translation[i] - a->translation[i]) * t;
+
+    /* a change of mirroring cannot be interpolated: it snaps at the next key */
+    if (a->scale[0] == b->scale[0] && a->scale[1] == b->scale[1] && a->scale[2] == b->scale[2])
+    {
+        v4c__quat_slerp(a->quaternion, b->quaternion, t, out.quaternion);
+        v4c__rotation_from_quaternion(&out);
+    }
+    return out;
+}
+
+static uint32_t v4c__frame_index(float frame)
+{
+    if (!(frame > 0.0f)) /* also NaN */
+        return 0u;
+
+    return frame >= 4294967040.0f ? 0xFFFFFF00u : (uint32_t)frame;
+}
+
+static v4c_transform v4c__sample_transform_at(const v4c_transform_key* k, uint32_t n, bool loop, float frame,
+                                              float scale, v4c_sampling sampling)
+{
+    double  f = frame > 0.0f ? (double)frame : 0.0;
+    double  first, last;
+    int32_t i;
+    if (sampling != V4C_SAMPLE_SMOOTH || n < 2)
+        return v4c__sample_transform(k, n, loop, v4c__frame_index(frame), scale);
+
+    first = (double)k[0].frame;
+    last  = (double)k[n - 1].frame;
+    if (loop)
+    {
+        const double len = last - first + 1.0;
+        f                = f - first;
+        f                = first + (f - v4c__floor(f / len) * len);
+        if (f > last) /* between the last key and the first one of the next cycle */
+            return v4c__blend_transform(&k[n - 1].transform, &k[0].transform, (float)(f - last));
+    }
+
+    if (f <= first)
+        return k[0].transform;
+
+    if (f >= last)
+        return k[n - 1].transform;
+
+    for (i = (int32_t)n - 2; i >= 0; --i)
+        if (f >= (double)k[i].frame)
+            return v4c__blend_transform(&k[i].transform, &k[i + 1].transform,
+                                        (float)((f - (double)k[i].frame) / (double)(k[i + 1].frame - k[i].frame)));
+
+    return k[0].transform;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2942,8 +3179,28 @@ static void v4c__free_mesh(v4c_mesh* mesh)
     V4C_FREE(mesh->materials);
     V4C_FREE(mesh->packed);
     V4C_FREE(mesh->indices);
+    V4C_FREE(mesh->indices16);
     V4C_FREE(mesh->submeshes);
     memset(mesh, 0, sizeof(*mesh));
+}
+
+/* V4C_FLAG_16BIT_INDICES: replaces indices by indices16 when every index fits. */
+static int v4c__mesh_to_16bit(v4c_mesh* mesh)
+{
+    uint32_t i;
+    if (!mesh->indices || mesh->num_vertices > 65536u)
+        return 1;
+
+    mesh->indices16 = (uint16_t*)v4c__calloc(mesh->num_indices, sizeof(uint16_t));
+    if (!mesh->indices16)
+        return 0;
+
+    for (i = 0; i < mesh->num_indices; ++i)
+        mesh->indices16[i] = (uint16_t)mesh->indices[i];
+
+    V4C_FREE(mesh->indices);
+    mesh->indices = NULL;
+    return 1;
 }
 
 static int v4c__build_mesh(v4c__mesher* m, uint32_t num_materials, v4c_mesh* out)
@@ -2975,6 +3232,7 @@ static int v4c__build_mesh(v4c__mesher* m, uint32_t num_materials, v4c_mesh* out
     }
 
     out->num_vertices = m->num_vertices;
+    out->clockwise    = m->clockwise != 0;
     out->packed       = m->packed;
     out->positions    = m->positions;
     out->normals      = m->normals;
@@ -3277,12 +3535,18 @@ static void v4c__build_scene(v4c__ctx* c, v4c_scene* s)
                 max_frame = n->model_keys[j].frame;
     }
     s->num_frames = max_frame + 1u;
+    /* without META the editor shows its default timeline 0 .. 30; MagicaVoxel 0.99.7
+       writes exactly that when it re-saves an older file */
+    s->anim_first = c->has_anim_range ? c->anim_range[0] : 0u;
+    s->anim_last  = c->has_anim_range ? c->anim_range[1] : (max_frame > 30u ? max_frame : 30u);
 
     /* ---- single frame: sample every node, keep one key ---- */
     if (single)
     {
+        /* any frame up to the end of the keys or of the editor's range: looping
+           nodes wrap, the others hold their last key (as in MagicaVoxel) */
         const uint32_t frame = (uint32_t)c->opt.frame;
-        if (frame >= s->num_frames)
+        if (frame > max_frame && frame > s->anim_last)
         {
             v4c__fail(c, V4C_ERROR_FRAME_NOT_FOUND);
             return;
@@ -3522,6 +3786,9 @@ static void v4c__build_scene(v4c__ctx* c, v4c_scene* s)
             }
             ok = v4c__build_mesh(&m, s->num_materials, &om->mesh);
             v4c__mesher_free_scratch(&m);
+            if (ok && (flags & V4C_FLAG_16BIT_INDICES))
+                ok = v4c__mesh_to_16bit(&om->mesh);
+
             if (!ok)
                 v4c__fail(c, V4C_ERROR_OUT_OF_MEMORY);
         }
@@ -3855,6 +4122,350 @@ VOX4C_API bool v4c_node_is_visible(const v4c_scene* s, uint32_t node)
         n = nd->parent;
     }
     return true;
+}
+
+VOX4C_API v4c_transform v4c_sample_node_transform_at(const v4c_scene* s, uint32_t node, float frame,
+                                                     v4c_sampling sampling)
+{
+    const v4c_node* n;
+    if (!s || node >= s->num_nodes)
+    {
+        v4c_transform t;
+        v4c__identity_transform(&t);
+        return t;
+    }
+    n = &s->nodes[node];
+    return v4c__sample_transform_at(n->transform_keys, n->num_transform_keys, n->transform_loop, frame, s->scale,
+                                    sampling);
+}
+
+/* Same composition order as v4c_node_world_matrix (identical results). */
+static void v4c__node_world_matrix_at(const v4c_scene* s, uint32_t node, float frame, v4c_sampling sampling,
+                                      float out[16])
+{
+    uint32_t      guard = 0;
+    int32_t       p;
+    v4c_transform t = v4c_sample_node_transform_at(s, node, frame, sampling);
+    v4c_transform_to_matrix(&t, out);
+    p = s->nodes[node].parent;
+    while (p >= 0 && (uint32_t)p < s->num_nodes && guard++ < s->num_nodes)
+    {
+        float parent[16];
+        t = v4c_sample_node_transform_at(s, (uint32_t)p, frame, sampling);
+        v4c_transform_to_matrix(&t, parent);
+        v4c__mat4_mul(parent, out, out);
+        p = s->nodes[p].parent;
+    }
+}
+
+VOX4C_API uint32_t v4c_frame_instances(const v4c_scene* s, float frame, v4c_sampling sampling, bool visible_only,
+                                       v4c_instance* out, uint32_t capacity)
+{
+    const uint32_t fi    = v4c__frame_index(frame);
+    uint32_t       count = 0, n;
+    if (!s)
+        return 0;
+
+    for (n = 0; n < s->num_nodes; ++n)
+    {
+        const int32_t model = v4c_sample_node_model(s, n, fi);
+        if (model < 0 || (uint32_t)model >= s->num_models || (visible_only && !v4c_node_is_visible(s, n)))
+            continue;
+
+        if (out && count < capacity)
+        {
+            v4c_instance* in = &out[count];
+            float         offset[16];
+            const float*  M = in->matrix;
+            v4c__node_world_matrix_at(s, n, frame, sampling, in->matrix);
+            memset(offset, 0, sizeof(offset));
+            offset[0] = offset[5] = offset[10] = offset[15] = 1.0f;
+            offset[12]                                      = s->models[model].scene_offset[0];
+            offset[13]                                      = s->models[model].scene_offset[1];
+            offset[14]                                      = s->models[model].scene_offset[2];
+            v4c__mat4_mul(in->matrix, offset, in->matrix);
+            in->node     = n;
+            in->model    = (uint32_t)model;
+            in->mirrored = M[0] * (M[5] * M[10] - M[9] * M[6]) - M[4] * (M[1] * M[10] - M[9] * M[2]) +
+                               M[8] * (M[1] * M[6] - M[5] * M[2]) <
+                           0.0f;
+        }
+        ++count;
+    }
+    return count;
+}
+
+/* Meshes model `om` of scene `s` from its voxels into `out` (empty if it has none). */
+static int v4c__mesh_model(const v4c_scene* s, const v4c_model* om, uint32_t flags, v4c_mesh* out)
+{
+    v4c__mesher    m;
+    uint8_t*       grid;
+    const uint32_t bias = s->num_materials >= 256u ? 0u : 1u; /* as when loading */
+    size_t         volume;
+    uint32_t       i, a;
+    int            ok;
+    memset(out, 0, sizeof(*out));
+    out->clockwise = (flags & V4C_FLAG_CLOCKWISE_WINDING) != 0;
+    if (!om->voxels || om->num_voxels == 0)
+        return 1;
+
+    volume = (size_t)om->size[0] * om->size[1] * om->size[2];
+    grid   = (uint8_t*)v4c__calloc(volume ? volume : 1u, 1);
+    if (!grid)
+        return 0;
+
+    for (i = 0; i < om->num_voxels; ++i)
+    {
+        const v4c_voxel* v = &om->voxels[i];
+        if (v->x < om->size[0] && v->y < om->size[1] && v->z < om->size[2])
+            grid[v->x + (size_t)om->size[0] * (v->y + (size_t)om->size[1] * v->z)] = (uint8_t)(v->material + bias);
+    }
+
+    memset(&m, 0, sizeof(m));
+    m.grid          = grid;
+    m.bias          = bias;
+    m.scale         = s->scale;
+    m.inv_materials = 1.0f / (float)(s->num_materials ? s->num_materials : 1u);
+    m.clockwise     = (flags & V4C_FLAG_CLOCKWISE_WINDING) ? 1 : 0;
+    m.use_packed    = (flags & V4C_FLAG_PACKED_VERTICES) ? 1 : 0;
+    for (a = 0; a < 3u; ++a)
+    {
+        m.size[a]  = om->size[a];
+        m.pivot[a] = om->pivot[a];
+    }
+
+    ok = v4c__build_mesh(&m, s->num_materials, out);
+    v4c__mesher_free_scratch(&m);
+    V4C_FREE(grid);
+    if (ok && (flags & V4C_FLAG_16BIT_INDICES))
+        ok = v4c__mesh_to_16bit(out);
+
+    if (!ok)
+        v4c__free_mesh(out);
+
+    return ok;
+}
+
+VOX4C_API v4c_result v4c_build_model_mesh(v4c_scene* s, uint32_t model, uint32_t flags)
+{
+    v4c_model* om;
+    v4c_mesh   mesh;
+    if (!s || model >= s->num_models)
+        return V4C_ERROR_INVALID_ARGUMENT;
+
+    om = &s->models[model];
+    if (!om->voxels && om->num_voxels > 0) /* loaded with V4C_FLAG_DISCARD_VOXELS */
+        return V4C_ERROR_INVALID_ARGUMENT;
+
+    if (!v4c__mesh_model(s, om, flags, &mesh))
+        return V4C_ERROR_OUT_OF_MEMORY;
+
+    v4c__free_mesh(&om->mesh);
+    om->mesh = mesh;
+    return V4C_SUCCESS;
+}
+
+VOX4C_API void v4c_free_model_mesh(v4c_scene* s, uint32_t model)
+{
+    if (s && model < s->num_models)
+        v4c__free_mesh(&s->models[model].mesh);
+}
+
+VOX4C_API void v4c_free_mesh(v4c_mesh* mesh)
+{
+    if (mesh)
+        v4c__free_mesh(mesh);
+}
+
+VOX4C_API uint32_t v4c_mesh_index(const v4c_mesh* mesh, uint32_t i)
+{
+    if (!mesh || i >= mesh->num_indices)
+        return 0;
+
+    if (mesh->indices16)
+        return mesh->indices16[i];
+
+    return mesh->indices ? mesh->indices[i] : 0u;
+}
+
+/* v4c_bake_frame, step 1: the mesh of every model drawn in the frame (its own, or a
+   temporary one built from the voxels into temp[]) and the index count per material */
+static v4c_result v4c__bake_collect(const v4c_scene* s, const v4c_instance* inst, uint32_t num_inst,
+                                    const v4c_mesh** meshes, v4c_mesh* temp, uint32_t counts[256],
+                                    uint64_t* total_vertices, uint64_t* total_indices)
+{
+    uint32_t i, k;
+    memset(counts, 0, 256u * sizeof(uint32_t));
+    *total_vertices = 0;
+    *total_indices  = 0;
+    for (i = 0; i < num_inst; ++i)
+    {
+        const uint32_t  m = inst[i].model;
+        const v4c_mesh* mesh;
+        if (!meshes[m])
+        {
+            const v4c_model* om = &s->models[m];
+            if (om->mesh.num_vertices > 0 || om->num_voxels == 0)
+                meshes[m] = &om->mesh;
+            else if (!om->voxels) /* neither a mesh nor voxels (V4C_FLAG_DISCARD_VOXELS) */
+                return V4C_ERROR_INVALID_ARGUMENT;
+            else if (v4c__mesh_model(s, om, 0, &temp[m]))
+                meshes[m] = &temp[m];
+            else
+                return V4C_ERROR_OUT_OF_MEMORY;
+        }
+        mesh = meshes[m];
+        *total_vertices += mesh->num_vertices;
+        *total_indices += mesh->num_indices;
+        for (k = 0; k < mesh->num_submeshes; ++k)
+            counts[mesh->submeshes[k].material & 255u] += mesh->submeshes[k].num_indices;
+    }
+
+    if (*total_vertices > 0xFFFFFFFFu || *total_indices > 0xFFFFFFFFu)
+        return V4C_ERROR_OUT_OF_MEMORY;
+
+    return V4C_SUCCESS;
+}
+
+/* v4c_bake_frame, step 2: allocates `out` and writes every instance into it, the
+   triangles grouped by material; on failure the caller frees `out` */
+static v4c_result v4c__bake_fill(const v4c_scene* s, const v4c_instance* inst, uint32_t num_inst,
+                                 const v4c_mesh* const* meshes, const uint32_t counts[256], uint32_t num_vertices,
+                                 uint32_t num_indices, int want_cw, v4c_mesh* out)
+{
+    uint32_t offsets[256];
+    uint32_t i, k, num_sub = 0, base = 0, running = 0;
+    for (k = 0; k < 256u; ++k)
+        if (counts[k])
+            ++num_sub;
+
+    out->num_vertices  = num_vertices;
+    out->num_indices   = num_indices;
+    out->num_submeshes = num_sub;
+    out->positions     = (float*)v4c__calloc((size_t)num_vertices * 3u, sizeof(float));
+    out->normals       = (float*)v4c__calloc((size_t)num_vertices * 3u, sizeof(float));
+    out->texcoords     = (float*)v4c__calloc((size_t)num_vertices * 2u, sizeof(float));
+    out->materials     = (uint8_t*)v4c__calloc((size_t)num_vertices, 1);
+    out->indices       = (uint32_t*)v4c__calloc((size_t)num_indices, sizeof(uint32_t));
+    out->submeshes     = (v4c_submesh*)v4c__calloc(num_sub, sizeof(v4c_submesh));
+    if (!out->positions || !out->normals || !out->texcoords || !out->materials || !out->indices || !out->submeshes)
+        return V4C_ERROR_OUT_OF_MEMORY;
+
+    num_sub = 0;
+    for (k = 0; k < 256u; ++k)
+    {
+        offsets[k] = running;
+        if (counts[k])
+        {
+            out->submeshes[num_sub].material    = k;
+            out->submeshes[num_sub].first_index = running;
+            out->submeshes[num_sub].num_indices = counts[k];
+            ++num_sub;
+        }
+        running += counts[k];
+    }
+
+    for (i = 0; i < num_inst; ++i)
+    {
+        const v4c_mesh* mesh = meshes[inst[i].model];
+        const float*    M    = inst[i].matrix;
+        const int       flip = ((int)inst[i].mirrored ? 1 : 0) ^ ((int)mesh->clockwise ? 1 : 0) ^ want_cw;
+        v4c_model       om   = s->models[inst[i].model];
+        uint32_t        v;
+        om.mesh = *mesh; /* v4c_mesh_vertex reads the temporary mesh too */
+        for (v = 0; v < mesh->num_vertices; ++v)
+        {
+            float          p[3], nrm[3], tc[2];
+            float*         op  = &out->positions[(size_t)(base + v) * 3u];
+            float*         on  = &out->normals[(size_t)(base + v) * 3u];
+            const uint32_t mat = v4c_mesh_vertex(s, &om, v, p, nrm, tc);
+            int            r;
+            for (r = 0; r < 3; ++r)
+            {
+                op[r] = M[0 * 4 + r] * p[0] + M[1 * 4 + r] * p[1] + M[2 * 4 + r] * p[2] + M[3 * 4 + r];
+                on[r] = M[0 * 4 + r] * nrm[0] + M[1 * 4 + r] * nrm[1] + M[2 * 4 + r] * nrm[2];
+            }
+            out->texcoords[(size_t)(base + v) * 2u + 0] = tc[0];
+            out->texcoords[(size_t)(base + v) * 2u + 1] = tc[1];
+            out->materials[base + v]                    = (uint8_t)mat;
+        }
+
+        for (k = 0; k < mesh->num_submeshes; ++k)
+        {
+            const v4c_submesh* sub = &mesh->submeshes[k];
+            uint32_t*          dst = &out->indices[offsets[sub->material & 255u]];
+            uint32_t           t;
+            for (t = 0; t + 2u < sub->num_indices; t += 3u)
+            {
+                const uint32_t i0 = v4c_mesh_index(mesh, sub->first_index + t) + base;
+                const uint32_t i1 = v4c_mesh_index(mesh, sub->first_index + t + 1u) + base;
+                const uint32_t i2 = v4c_mesh_index(mesh, sub->first_index + t + 2u) + base;
+                dst[t]            = i0;
+                dst[t + 1u]       = flip ? i2 : i1;
+                dst[t + 2u]       = flip ? i1 : i2;
+            }
+            offsets[sub->material & 255u] += sub->num_indices;
+        }
+        base += mesh->num_vertices;
+    }
+    return V4C_SUCCESS;
+}
+
+VOX4C_API v4c_result v4c_bake_frame(const v4c_scene* s, float frame, v4c_sampling sampling, bool visible_only,
+                                    uint32_t flags, v4c_mesh* out)
+{
+    v4c_instance*    inst   = NULL;
+    const v4c_mesh** meshes = NULL;
+    v4c_mesh*        temp   = NULL;
+    uint32_t         counts[256];
+    uint64_t         total_vertices = 0, total_indices = 0;
+    uint32_t         num_inst, i;
+    const int        want_cw = (flags & V4C_FLAG_CLOCKWISE_WINDING) != 0;
+    v4c_result       res     = V4C_SUCCESS;
+    if (!s || !out)
+        return V4C_ERROR_INVALID_ARGUMENT;
+
+    memset(out, 0, sizeof(*out));
+    out->clockwise = want_cw != 0;
+    num_inst       = v4c_frame_instances(s, frame, sampling, visible_only, NULL, 0);
+    if (num_inst == 0)
+        return V4C_SUCCESS;
+
+    inst   = (v4c_instance*)v4c__calloc(num_inst, sizeof(v4c_instance));
+    meshes = (const v4c_mesh**)v4c__calloc(s->num_models, sizeof(const v4c_mesh*));
+    temp   = (v4c_mesh*)v4c__calloc(s->num_models, sizeof(v4c_mesh));
+    if (!inst || !meshes || !temp)
+    {
+        res = V4C_ERROR_OUT_OF_MEMORY;
+    }
+    else
+    {
+        num_inst = v4c_frame_instances(s, frame, sampling, visible_only, inst, num_inst);
+        res      = v4c__bake_collect(s, inst, num_inst, meshes, temp, counts, &total_vertices, &total_indices);
+    }
+
+    /* an empty frame (models without voxels) stays an empty mesh */
+    if (res == V4C_SUCCESS && total_vertices > 0 && total_indices > 0)
+    {
+        res = v4c__bake_fill(s, inst, num_inst, meshes, counts, (uint32_t)total_vertices, (uint32_t)total_indices,
+                             want_cw, out);
+        if (res == V4C_SUCCESS && (flags & V4C_FLAG_16BIT_INDICES) && !v4c__mesh_to_16bit(out))
+            res = V4C_ERROR_OUT_OF_MEMORY;
+    }
+
+    /* single clean-up for every path: the temporary meshes and work arrays always,
+       the result only on failure */
+    if (temp)
+        for (i = 0; i < s->num_models; ++i)
+            v4c__free_mesh(&temp[i]);
+
+    V4C_FREE(temp);
+    V4C_FREE((void*)meshes);
+    V4C_FREE(inst);
+    if (res != V4C_SUCCESS)
+        v4c__free_mesh(out);
+
+    return res;
 }
 
 VOX4C_API bool v4c_scene_bounds(const v4c_scene* s, uint32_t frame, bool visible_only, float mn[3], float mx[3])

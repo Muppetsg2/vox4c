@@ -1,4 +1,4 @@
-foreach(_example vox4c_info vox2obj vox4c_memory)
+foreach(_example vox4c_info vox2obj vox4c_memory vox4c_anim)
     add_executable(${_example} ${_example}.c)
     target_link_libraries(${_example} PRIVATE vox4c::vox4c)
     vox4c_configure_executable(${_example})
@@ -15,6 +15,13 @@ vox4c_add_vox_files_target(vox4c_run_info
     EXECUTABLE vox4c_info
     ARGS --compact
     COMMENT "vox4c: scene / material / node dump of every .vox file")
+
+# cmake --build <dir> --target vox4c_run_anim
+vox4c_add_vox_files_target(vox4c_run_anim
+    MODE EACH
+    EXECUTABLE vox4c_anim
+    ARGS --smooth --step 0.5
+    COMMENT "vox4c: animation timeline, instances and on-demand mesh memory of every .vox file")
 
 # cmake --build <dir> --target vox4c_memory_report   (-> <build>/vox4c_memory.md)
 vox4c_add_vox_files_target(vox4c_memory_report
@@ -78,6 +85,7 @@ if(_vox4c_vs_launch)
         add_vs_launch_config(NAME "vox2obj (${_vox_name})" TARGET vox2obj
                              ARGS "${_vox}" "${CMAKE_BINARY_DIR}/${_vox_stem}.obj")
         add_vs_launch_config(NAME "vox4c_memory (vox_files)" TARGET vox4c_memory ARGS ${VOX4C_VS_LAUNCH_FILES})
+        add_vs_launch_config(NAME "vox4c_anim (${_vox_name})" TARGET vox4c_anim ARGS "${_vox}" --smooth)
     else()
         message(STATUS "vox4c: no .vox files in ${VOX4C_VOX_FILES_DIR}, no debug configurations for the examples")
     endif()
