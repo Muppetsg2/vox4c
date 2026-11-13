@@ -510,7 +510,7 @@ include(cmake/CPM.cmake)
 CPMAddPackage(
     NAME vox4c
     GITHUB_REPOSITORY Muppetsg2/vox4c
-    GIT_TAG v1.0.0
+    GIT_TAG v1.1.0
 )
 
 target_link_libraries(my_app PRIVATE vox4c::vox4c)
@@ -522,7 +522,7 @@ or, with the prebuilt static library:
 CPMAddPackage(
     NAME vox4c
     GITHUB_REPOSITORY Muppetsg2/vox4c
-    GIT_TAG v1.0.0
+    GIT_TAG v1.1.0
     OPTIONS "VOX4C_BUILD_LIBRARY ON"
 )
 
@@ -542,7 +542,7 @@ cmake --install build --prefix /path/to/prefix
 ```
 
 ```cmake
-find_package(vox4c 1.0 CONFIG REQUIRED)
+find_package(vox4c 1.1.0 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE vox4c::vox4c)    # or vox4c::lib
 ```
 
