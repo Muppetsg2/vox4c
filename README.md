@@ -1,3 +1,5 @@
+![vox4c Logo](https://github.com/Muppetsg2/vox4c/blob/main/.github/favicon.svg)
+
 # vox4c
 
 Single-header C99 library for loading [MagicaVoxel](https://ephtracy.github.io/) `.vox` files, in the spirit of
